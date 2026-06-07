@@ -227,10 +227,11 @@ class WalletTracker:
         )
 
         while self._running:
-            await asyncio.gather(
-                *[self._poll_wallet(t.address) for t in TRADERS],
-                return_exceptions=True,
-            )
+            for trader in TRADERS:
+                if not self._running:
+                    break
+                await self._poll_wallet(trader.address)
+                await asyncio.sleep(0.5)
             await asyncio.sleep(WALLET_POLL_INTERVAL_SECONDS)
 
     def stop(self) -> None:
