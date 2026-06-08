@@ -26,6 +26,23 @@ GMGN_TRENDING_URL = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h"
 GMGN_SIGNALS_URL  = "https://gmgn.ai/defi/quotation/v1/signals/sol"
 GMGN_TOKEN_URL    = "https://gmgn.ai/defi/quotation/v1/tokens/sol/{mint}"
 
+GMGN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://gmgn.ai/",
+    "Origin": "https://gmgn.ai",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
 if TYPE_CHECKING:
     from modules.executor import Executor
 
@@ -339,14 +356,14 @@ class CoinScanner:
                 "direction": "desc",
                 "filters[]": ["renounced", "frozen"],
             }
-            headers = {"User-Agent": "Mozilla/5.0"}
             data = await fetch_json(
                 self.session, "GET", GMGN_TRENDING_URL,
-                params=params, headers=headers, label="GMGN trending",
+                params=params, headers=GMGN_HEADERS, label="GMGN trending",
             )
             tokens = data.get("data", {}).get("rank", []) or []
             mints = [t.get("address", "") for t in tokens if t.get("address")]
-            logger.info("GMGN trending: %d tokens", len(mints))
+            if mints:
+                logger.info("GMGN trending: %d tokens", len(mints))
             return mints
         except Exception as exc:
             logger.warning("GMGN trending fetch failed: %s", exc)
@@ -355,10 +372,9 @@ class CoinScanner:
     async def _fetch_gmgn_signals(self) -> list[str]:
         """Fetch smart money buy signals from GMGN."""
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
             data = await fetch_json(
                 self.session, "GET", GMGN_SIGNALS_URL,
-                headers=headers, label="GMGN signals",
+                headers=GMGN_HEADERS, label="GMGN signals",
             )
             signals = data.get("data", []) or []
             mints = [s.get("token_address", "") for s in signals if s.get("token_address")]
