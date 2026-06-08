@@ -69,7 +69,7 @@ SCAN_MIN_LIQUIDITY_USD = 30_000  # must have at least $30k liquidity to buy
 SCAN_MIN_AGE_HOURS     = 1.0   # must be at least 1 hour old (less likely to be fresh rug)
 
 # Wallet tracker settings
-WALLET_POLL_INTERVAL_SECONDS = 5
+WALLET_POLL_INTERVAL_SECONDS = 20  # 8 wallets × 1s gap = ~28s per full cycle, stays under free tier
 
 # Risk manager settings
 RISK_POLL_INTERVAL_SECONDS = 5
