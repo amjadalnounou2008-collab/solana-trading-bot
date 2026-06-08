@@ -452,16 +452,8 @@ class CoinScanner:
             except Exception as exc:
                 logger.error("Error evaluating %s: %s", mint[:8], exc)
 
-        # ── GMGN scan ─────────────────────────────────────────────────────────
-        gmgn_trending = await self._fetch_gmgn_trending()
-        for mint in gmgn_trending[:10]:
-            await self._evaluate_gmgn_token(mint, "trending")
-            await asyncio.sleep(0.5)
-
-        gmgn_signals = await self._fetch_gmgn_signals()
-        for mint in gmgn_signals[:5]:
-            await self._evaluate_gmgn_token(mint, "smart_money")
-            await asyncio.sleep(0.5)
+        # GMGN disabled — Railway datacenter IPs are blocked by GMGN (403)
+        # DexScreener scanning handles discovery instead
 
     async def run(self) -> None:
         self._running = True

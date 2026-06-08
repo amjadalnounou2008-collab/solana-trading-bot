@@ -231,8 +231,9 @@ class WalletTracker:
                 if not self._running:
                     break
                 await self._poll_wallet(trader.address)
-                await asyncio.sleep(2.5)  # 8 wallets × 2.5s = 20s per cycle
-            await asyncio.sleep(WALLET_POLL_INTERVAL_SECONDS)
+                await asyncio.sleep(3.0)  # sequential — one wallet at a time, 3s gap
+            # extra rest after full cycle to stay under Helius free tier
+            await asyncio.sleep(15.0)
 
     def stop(self) -> None:
         self._running = False
