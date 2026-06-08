@@ -75,9 +75,9 @@ WALLET_POLL_INTERVAL_SECONDS = 20  # 8 wallets × 1s gap = ~28s per full cycle, 
 
 # Risk manager settings
 RISK_POLL_INTERVAL_SECONDS = 5
-TP1_MULTIPLIER = 2.0      # sell 25% at 2x — lock in quick profit
-TP2_MULTIPLIER = 5.0      # sell 25% at 5x — let the rest ride
-TP3_MULTIPLIER = 20.0     # sell 25% at 20x — catch the moonshots
+TP1_MULTIPLIER = 1.5      # sell 25% at 1.5x — bank profit before dump
+TP2_MULTIPLIER = 3.0      # sell 25% at 3x
+TP3_MULTIPLIER = 10.0    # sell 25% at 10x
 TP1_SELL_PCT = 25.0
 TP2_SELL_PCT = 25.0
 TP3_SELL_PCT = 25.0       # keeps 25% riding with trailing stop for 100x+
@@ -91,3 +91,6 @@ TIME_STOP_MIN_MULTIPLIER = 1.3  # needs at least 1.3x in 30 min or we exit
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.5
 DEFAULT_SLIPPAGE_BPS = 300
+SELL_SLIPPAGE_BPS = 1000          # 10% slippage on sells — meme coins move fast
+SELL_SLIPPAGE_RETRY_BPS = [1000, 2500, 5000, 10000]
+SELL_PRIORITY_FEE_LAMPORTS = 300_000

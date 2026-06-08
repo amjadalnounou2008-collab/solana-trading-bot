@@ -204,6 +204,7 @@ class Position:
     total_sol_received: float = 0.0
     partial_exits: list[dict[str, Any]] = field(default_factory=list)
     price_miss_count: int = 0
+    sell_fail_count: int = 0
 
 
 # ── Risk Manager ─────────────────────────────────────────────────────────────
@@ -241,6 +242,7 @@ class RiskManager:
             initial_sol=buy.amount_sol,
             reason=buy.reason,
             score_breakdown=buy.score_breakdown,
+            decimals=buy.decimals,
         )
         self.positions[buy.position_id] = position
         await self._persist(position)
@@ -254,12 +256,21 @@ class RiskManager:
             return 1.0
         return current_price / position.entry_price_usd
 
-    async def _sell_partial(self, position: Position, sell_pct: float, exit_reason: str) -> float:
+    async def _sync_wallet_balance(self, position: Position) -> None:
+        """Keep tracked balance in sync with what's actually in the wallet."""
+        amount, decimals = await self.executor.get_token_balance(position.mint)
+        if amount > 0:
+            position.remaining_tokens = amount
+            position.decimals = decimals
+
+    async def _sell_partial(self, position: Position, sell_pct: float, exit_reason: str) -> bool:
+        await self._sync_wallet_balance(position)
         if position.remaining_tokens <= 0:
-            return 0.0
+            return True
+
         tokens_to_sell = position.remaining_tokens * (sell_pct / 100.0)
         if tokens_to_sell <= 0:
-            return 0.0
+            return True
 
         sell_result = await self.executor.sell_token(
             mint=position.mint,
@@ -269,7 +280,8 @@ class RiskManager:
             sell_pct=sell_pct,
         )
         if sell_result.success:
-            position.remaining_tokens -= tokens_to_sell
+            position.sell_fail_count = 0
+            await self._sync_wallet_balance(position)
             position.total_sol_received += sell_result.sol_received
             position.partial_exits.append({
                 "reason": exit_reason,
@@ -280,15 +292,26 @@ class RiskManager:
             await self._persist(position)
             logger.info("Partial sell — %s | %s | %.2f%% | %.4f SOL",
                         position.symbol, exit_reason, sell_pct, sell_result.sol_received)
-            return sell_result.sol_received
-        return 0.0
+            return True
+
+        position.sell_fail_count += 1
+        await self._persist(position)
+        logger.warning("Sell failed for %s (%s) — attempt %d, will retry",
+                         position.symbol, exit_reason, position.sell_fail_count)
+        return False
 
     async def _close_position(self, position: Position, exit_reason: str, exit_price: float) -> None:
         if position.closed:
             return
 
         if position.remaining_tokens > 0:
-            await self._sell_partial(position, 100.0, exit_reason)
+            sold = await self._sell_partial(position, 100.0, exit_reason)
+            if not sold:
+                return  # keep position open — sell failed, retry next poll
+
+        await self._sync_wallet_balance(position)
+        if position.remaining_tokens > 0.0001:
+            return  # tokens still in wallet after sell attempt
 
         position.closed = True
         await self._persist(position)
@@ -340,7 +363,39 @@ class RiskManager:
         pnl_pct      = (multiplier - 1.0) * 100.0
         hold_minutes = (datetime.now(timezone.utc) - position.entry_time).total_seconds() / 60.0
 
-        # Stop loss -25%
+        # Also check real Jupiter sell quote — price feed can lie on meme coins
+        await self._sync_wallet_balance(position)
+        if position.remaining_tokens > 0:
+            raw = int(position.remaining_tokens * (10 ** position.decimals))
+            quote_sol = await self.executor.get_sell_quote_sol(position.mint, raw)
+            if quote_sol and position.initial_sol > 0:
+                quote_mult = quote_sol / position.initial_sol
+                position.peak_multiplier = max(position.peak_multiplier, quote_mult)
+                quote_pnl_pct = (quote_mult - 1.0) * 100.0
+                if quote_pnl_pct > pnl_pct:
+                    pnl_pct = quote_pnl_pct
+                    multiplier = quote_mult
+
+        # Take profits FIRST — don't let a fast dump skip TP
+        if multiplier >= TP1_MULTIPLIER and not position.tp1_hit:
+            if await self._sell_partial(position, TP1_SELL_PCT, "TP1"):
+                position.tp1_hit = True
+                await self._persist(position)
+
+        if multiplier >= TP2_MULTIPLIER and not position.tp2_hit:
+            if await self._sell_partial(position, TP2_SELL_PCT, "TP2"):
+                position.tp2_hit = True
+                await self._persist(position)
+
+        if multiplier >= TP3_MULTIPLIER and not position.tp3_hit:
+            if await self._sell_partial(position, TP3_SELL_PCT, "TP3"):
+                position.tp3_hit = True
+                await self._persist(position)
+                if position.remaining_tokens <= 0:
+                    await self._close_position(position, "TP3", current_price)
+                    return
+
+        # Stop loss
         if pnl_pct <= STOP_LOSS_PCT:
             await self._close_position(position, "SL", current_price)
             return
@@ -358,25 +413,10 @@ class RiskManager:
                 await self._close_position(position, "trailing", current_price)
                 return
 
-        # Time stop: 45 min under 1.5x
+        # Time stop
         if hold_minutes >= TIME_STOP_MINUTES and multiplier < TIME_STOP_MIN_MULTIPLIER:
             await self._close_position(position, "time_stop", current_price)
             return
-
-        # Take profits
-        if multiplier >= TP1_MULTIPLIER and not position.tp1_hit:
-            position.tp1_hit = True
-            await self._sell_partial(position, TP1_SELL_PCT, "TP1")
-
-        if multiplier >= TP2_MULTIPLIER and not position.tp2_hit:
-            position.tp2_hit = True
-            await self._sell_partial(position, TP2_SELL_PCT, "TP2")
-
-        if multiplier >= TP3_MULTIPLIER and not position.tp3_hit:
-            position.tp3_hit = True
-            await self._sell_partial(position, TP3_SELL_PCT, "TP3")
-            if position.remaining_tokens <= 0:
-                await self._close_position(position, "TP3", current_price)
 
     async def run(self) -> None:
         self._running = True

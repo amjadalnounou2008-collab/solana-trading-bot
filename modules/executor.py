@@ -21,6 +21,9 @@ from config import (
     JUPITER_SWAP_URL,
     LAMPORTS_PER_SOL,
     PAPER_TRADE,
+    SELL_PRIORITY_FEE_LAMPORTS,
+    SELL_SLIPPAGE_BPS,
+    SELL_SLIPPAGE_RETRY_BPS,
     SOL_MINT,
     SOLANA_SEND_RPC_URL,
     WALLET_PRIVATE_KEY,
@@ -44,6 +47,7 @@ class BuyResult:
     tx_signature: str | None
     reason: str
     score_breakdown: dict[str, Any] | None = None
+    decimals: int = 6
     position_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
@@ -206,7 +210,9 @@ class Executor:
             label="Jupiter quote",
         )
 
-    async def execute_swap(self, quote: dict[str, Any]) -> str | None:
+    async def execute_swap(
+        self, quote: dict[str, Any], *, priority_fee: int = SELL_PRIORITY_FEE_LAMPORTS,
+    ) -> str | None:
         if self.paper_trade or not self.keypair:
             out_amount = int(quote.get("outAmount", 0))
             logger.info(
@@ -221,7 +227,7 @@ class Executor:
             "userPublicKey": str(self.keypair.pubkey()),
             "wrapAndUnwrapSol": True,
             "dynamicComputeUnitLimit": True,
-            "prioritizationFeeLamports": 100_000,
+            "prioritizationFeeLamports": priority_fee,
         }
         swap_data = await fetch_json(
             self.session,
@@ -308,6 +314,7 @@ class Executor:
                 tx_signature=tx_sig,
                 reason=reason,
                 score_breakdown=score_breakdown,
+                decimals=out_decimals,
             )
 
             if self.risk_manager:
@@ -352,83 +359,124 @@ class Executor:
         symbol: str = "UNKNOWN",
         sell_pct: float = 100.0,
     ) -> SellResult:
+        # Always sell what's actually in the wallet — not stale tracked amounts
+        wallet_amount, wallet_decimals = await self.get_token_balance(mint)
+        if wallet_amount > 0:
+            decimals = wallet_decimals
+            amount_tokens = min(amount_tokens, wallet_amount)
+
         raw_amount = int(amount_tokens * (10**decimals))
+        if raw_amount <= 0:
+            logger.warning("SELL skip %s — zero balance in wallet", symbol)
+            return SellResult(
+                success=False, mint=mint, symbol=symbol, amount_tokens=0,
+                sol_received=0, exit_price_usd=0, tx_signature=None, sell_pct=sell_pct,
+            )
+
         logger.info(
-            "SELL signal — %s (%.2f%%) — %s tokens",
-            symbol,
-            sell_pct,
-            amount_tokens,
+            "SELL signal — %s (%.2f%%) — %.4f tokens (raw %d)",
+            symbol, sell_pct, amount_tokens, raw_amount,
         )
 
-        try:
-            quote = await self.get_quote(mint, SOL_MINT, raw_amount)
-            out_lamports = int(quote.get("outAmount", 0))
-            sol_received = lamports_to_sol(out_lamports)
+        last_exc: Exception | None = None
+        for slippage in SELL_SLIPPAGE_RETRY_BPS:
+            try:
+                quote = await self.get_quote(mint, SOL_MINT, raw_amount, slippage_bps=slippage)
+                out_lamports = int(quote.get("outAmount", 0))
+                if out_lamports <= 0:
+                    continue
+                sol_received = lamports_to_sol(out_lamports)
+                exit_price_usd = await self.get_token_price_usd(mint) or 0.0
 
-            token_price = await self.get_token_price_usd(mint)
-            sol_price = await self.get_sol_price_usd()
-            exit_price_usd = token_price or 0.0
+                logger.info(
+                    "SELL attempt %s — slippage %d bps, expect %.4f SOL back",
+                    symbol, slippage, sol_received,
+                )
+                tx_sig = await self.execute_swap(quote)
 
-            tx_sig = await self.execute_swap(quote)
+                logger.info(
+                    "SELL complete — %s sold %.4f tokens for %.4f SOL (tx: %s)",
+                    symbol, amount_tokens, sol_received, tx_sig,
+                )
+                if self.risk_manager:
+                    try:
+                        await self.risk_manager.alerter.send_message(
+                            f"✅ <b>SOLD — {symbol}</b>\n"
+                            f"Got back: {sol_received:.4f} SOL\n"
+                            f"Tx: <code>{tx_sig[:16]}...</code>"
+                        )
+                    except Exception:
+                        pass
+                return SellResult(
+                    success=True, mint=mint, symbol=symbol, amount_tokens=amount_tokens,
+                    sol_received=sol_received, exit_price_usd=exit_price_usd,
+                    tx_signature=tx_sig, sell_pct=sell_pct,
+                )
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("SELL failed %s at %d bps: %s", symbol, slippage, exc)
 
-            result = SellResult(
-                success=True,
-                mint=mint,
-                symbol=symbol,
-                amount_tokens=amount_tokens,
-                sol_received=sol_received,
-                exit_price_usd=exit_price_usd,
-                tx_signature=tx_sig,
-                sell_pct=sell_pct,
-            )
-            logger.info(
-                "SELL complete — %s sold %.4f tokens for %.4f SOL (tx: %s)",
-                symbol,
-                amount_tokens,
-                sol_received,
-                tx_sig,
-            )
-            return result
-
-        except Exception as exc:
-            logger.error("SELL failed for %s: %s", mint[:8], exc)
-            return SellResult(
-                success=False,
-                mint=mint,
-                symbol=symbol,
-                amount_tokens=amount_tokens,
-                sol_received=0,
-                exit_price_usd=0,
-                tx_signature=None,
-                sell_pct=sell_pct,
-            )
+        logger.error("SELL failed for %s after all retries: %s", mint[:8], last_exc)
+        if self.risk_manager:
+            try:
+                await self.risk_manager.alerter.send_message(
+                    f"❌ <b>SELL FAILED — {symbol}</b>\n"
+                    f"Tokens still in wallet. Will retry.\n"
+                    f"Error: {str(last_exc)[:150]}"
+                )
+            except Exception:
+                pass
+        return SellResult(
+            success=False, mint=mint, symbol=symbol, amount_tokens=amount_tokens,
+            sol_received=0, exit_price_usd=0, tx_signature=None, sell_pct=sell_pct,
+        )
 
     async def get_token_balance(self, mint: str) -> tuple[float, int]:
         if self.paper_trade or not self.keypair:
             return 0.0, 6
 
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                str(self.keypair.pubkey()),
-                {"mint": mint},
-                {"encoding": "jsonParsed"},
-            ],
-        }
-        data = await fetch_json(
-            self.session,
-            "POST",
-            HELIUS_RPC_URL,
-            json_body=payload,
-            label="Token balance fetch",
-        )
-        accounts = data.get("result", {}).get("value", [])
-        if not accounts:
-            return 0.0, 6
+        for rpc_url in (HELIUS_RPC_URL, SOLANA_SEND_RPC_URL):
+            payload = {
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    str(self.keypair.pubkey()),
+                    {"mint": mint},
+                    {"encoding": "jsonParsed"},
+                ],
+            }
+            try:
+                data = await fetch_json(
+                    self.session, "POST", rpc_url, json_body=payload,
+                    label=f"Balance {mint[:8]}",
+                )
+                accounts = data.get("result", {}).get("value", [])
+                if not accounts:
+                    continue
+                best_raw = 0
+                best_amount = 0.0
+                best_decimals = 6
+                for acc in accounts:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    raw = int(info["tokenAmount"]["amount"])
+                    if raw <= 0:
+                        continue
+                    dec = int(info["tokenAmount"]["decimals"])
+                    ui = info["tokenAmount"]["uiAmount"]
+                    amt = float(ui) if ui is not None else raw / (10**dec)
+                    if raw > best_raw:
+                        best_raw, best_amount, best_decimals = raw, amt, dec
+                if best_raw > 0:
+                    return best_amount, best_decimals
+            except Exception:
+                continue
+        return 0.0, 6
 
-        info = accounts[0]["account"]["data"]["parsed"]["info"]
-        amount = float(info["tokenAmount"]["uiAmount"] or 0)
-        decimals = int(info["tokenAmount"]["decimals"])
-        return amount, decimals
+    async def get_sell_quote_sol(self, mint: str, raw_amount: int) -> float | None:
+        """How much SOL Jupiter would pay right now — used for real PnL checks."""
+        try:
+            quote = await self.get_quote(mint, SOL_MINT, raw_amount, slippage_bps=SELL_SLIPPAGE_BPS)
+            out = int(quote.get("outAmount", 0))
+            return lamports_to_sol(out) if out > 0 else None
+        except Exception:
+            return None
