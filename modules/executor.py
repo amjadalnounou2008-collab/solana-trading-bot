@@ -110,7 +110,8 @@ class Executor:
                 label="SOL price fetch",
             )
             price = (
-                data.get("data", {}).get(SOL_MINT, {}).get("price")
+                data.get(SOL_MINT, {}).get("usdPrice")
+                or data.get("data", {}).get(SOL_MINT, {}).get("price")
                 or data.get(SOL_MINT, {}).get("price")
             )
             if price:
@@ -144,7 +145,8 @@ class Executor:
                 params={"ids": mint}, label=f"Jupiter price {mint[:8]}",
             )
             price = (
-                data.get("data", {}).get(mint, {}).get("price")
+                data.get(mint, {}).get("usdPrice")
+                or data.get("data", {}).get(mint, {}).get("price")
                 or data.get(mint, {}).get("price")
             )
             return float(price) if price else None
