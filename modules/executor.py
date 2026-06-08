@@ -225,6 +225,20 @@ class Executor:
         score_breakdown: dict[str, Any] | None = None,
     ) -> BuyResult:
         logger.info("BUY signal — %s (%s) for %.4f SOL — %s", symbol, mint[:8], amount_sol, reason)
+
+        # Alert immediately when signal fires — before swap attempt
+        if self.risk_manager:
+            try:
+                await self.risk_manager.alerter.send_message(
+                    f"🔔 <b>BUY SIGNAL — {symbol}</b>\n"
+                    f"Amount: {amount_sol} SOL\n"
+                    f"Reason: {reason}\n"
+                    f"Mint: <code>{mint[:16]}...</code>\n"
+                    f"Attempting swap..."
+                )
+            except Exception:
+                pass
+
         lamports = sol_to_lamports(amount_sol)
 
         try:
@@ -266,6 +280,14 @@ class Executor:
 
         except Exception as exc:
             logger.error("BUY failed for %s: %s", mint[:8], exc)
+            if self.risk_manager:
+                try:
+                    await self.risk_manager.alerter.send_message(
+                        f"❌ <b>BUY FAILED — {symbol}</b>\n"
+                        f"Error: {str(exc)[:200]}"
+                    )
+                except Exception:
+                    pass
             return BuyResult(
                 success=False,
                 mint=mint,
