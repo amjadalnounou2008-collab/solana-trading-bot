@@ -44,6 +44,7 @@ LAMPORTS_PER_SOL = 1_000_000_000
 
 # API endpoints
 HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+SOLANA_SEND_RPC_URL = "https://api.mainnet-beta.solana.com"
 HELIUS_TX_URL = "https://api-mainnet.helius-rpc.com/v0/addresses/{address}/transactions"
 JUPITER_QUOTE_URL = "https://api.jup.ag/swap/v1/quote"
 JUPITER_SWAP_URL = "https://api.jup.ag/swap/v1/swap"

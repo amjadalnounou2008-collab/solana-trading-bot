@@ -22,6 +22,7 @@ from config import (
     LAMPORTS_PER_SOL,
     PAPER_TRADE,
     SOL_MINT,
+    SOLANA_SEND_RPC_URL,
     WALLET_PRIVATE_KEY,
 )
 from modules.utils import fetch_json, lamports_to_sol, retry_async, sol_to_lamports
@@ -206,7 +207,8 @@ class Executor:
                     {"skipPreflight": True, "maxRetries": 3, "encoding": "base64"},
                 ],
             }
-            async with self.session.post(HELIUS_RPC_URL, json=body) as resp:
+            # Use public Solana RPC for sending to avoid Helius rate limits
+            async with self.session.post(SOLANA_SEND_RPC_URL, json=body) as resp:
                 result = await resp.json()
                 if "error" in result:
                     raise RuntimeError(result["error"])
