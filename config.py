@@ -45,9 +45,9 @@ LAMPORTS_PER_SOL = 1_000_000_000
 # API endpoints
 HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 HELIUS_TX_URL = "https://api-mainnet.helius-rpc.com/v0/addresses/{address}/transactions"
-JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
-JUPITER_SWAP_URL = "https://quote-api.jup.ag/v6/swap"
-JUPITER_PRICE_URL = "https://price.jup.ag/v6/price"
+JUPITER_QUOTE_URL = "https://api.jup.ag/swap/v1/quote"
+JUPITER_SWAP_URL = "https://api.jup.ag/swap/v1/swap"
+JUPITER_PRICE_URL = "https://api.jup.ag/price/v2"
 DEXSCREENER_PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
 DEXSCREENER_PAIRS_URL = "https://api.dexscreener.com/latest/dex/pairs/solana/{pair}"
