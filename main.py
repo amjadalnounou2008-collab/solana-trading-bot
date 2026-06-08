@@ -39,6 +39,7 @@ async def main() -> None:
         alerter = Alerter(session)
         executor = Executor(session)
         risk_manager = RiskManager(executor=executor, alerter=alerter)
+        await risk_manager.initialize()   # connects to PostgreSQL, loads open positions
         executor.risk_manager = risk_manager
 
         wallet_tracker = WalletTracker(session, executor)

@@ -30,80 +30,156 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("solana-bot.risk_manager")
 
-POSITIONS_FILE = "positions.json"
+DATABASE_URL   = os.getenv("DATABASE_URL", "")
+POSITIONS_FILE = "positions.json"   # fallback when no DB
 
 
-def _save_positions(positions: dict) -> None:
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _pos_to_dict(p: "Position") -> dict:
+    return {
+        "position_id": p.position_id,
+        "mint": p.mint,
+        "symbol": p.symbol,
+        "entry_price_usd": p.entry_price_usd,
+        "entry_time": p.entry_time.isoformat(),
+        "initial_tokens": p.initial_tokens,
+        "remaining_tokens": p.remaining_tokens,
+        "initial_sol": p.initial_sol,
+        "reason": p.reason,
+        "score_breakdown": p.score_breakdown,
+        "decimals": p.decimals,
+        "peak_multiplier": p.peak_multiplier,
+        "trailing_active": p.trailing_active,
+        "trailing_peak_multiplier": p.trailing_peak_multiplier,
+        "tp1_hit": p.tp1_hit,
+        "tp2_hit": p.tp2_hit,
+        "tp3_hit": p.tp3_hit,
+        "total_sol_received": p.total_sol_received,
+        "partial_exits": [
+            {k: str(v) if isinstance(v, datetime) else v for k, v in e.items()}
+            for e in p.partial_exits
+        ],
+    }
+
+
+def _dict_to_pos(d: dict) -> "Position":
+    return Position(
+        position_id=d["position_id"],
+        mint=d["mint"],
+        symbol=d["symbol"],
+        entry_price_usd=d["entry_price_usd"],
+        entry_time=datetime.fromisoformat(d["entry_time"]),
+        initial_tokens=d["initial_tokens"],
+        remaining_tokens=d["remaining_tokens"],
+        initial_sol=d["initial_sol"],
+        reason=d["reason"],
+        score_breakdown=d.get("score_breakdown"),
+        decimals=d.get("decimals", 6),
+        peak_multiplier=d.get("peak_multiplier", 1.0),
+        trailing_active=d.get("trailing_active", False),
+        trailing_peak_multiplier=d.get("trailing_peak_multiplier", 1.0),
+        tp1_hit=d.get("tp1_hit", False),
+        tp2_hit=d.get("tp2_hit", False),
+        tp3_hit=d.get("tp3_hit", False),
+        total_sol_received=d.get("total_sol_received", 0.0),
+    )
+
+
+# ── File-based fallback ───────────────────────────────────────────────────────
+
+def _file_save(positions: dict) -> None:
     try:
-        data = {}
-        for pid, p in positions.items():
-            if p.closed:
-                continue
-            data[pid] = {
-                "position_id": p.position_id,
-                "mint": p.mint,
-                "symbol": p.symbol,
-                "entry_price_usd": p.entry_price_usd,
-                "entry_time": p.entry_time.isoformat(),
-                "initial_tokens": p.initial_tokens,
-                "remaining_tokens": p.remaining_tokens,
-                "initial_sol": p.initial_sol,
-                "reason": p.reason,
-                "score_breakdown": p.score_breakdown,
-                "decimals": p.decimals,
-                "peak_multiplier": p.peak_multiplier,
-                "trailing_active": p.trailing_active,
-                "trailing_peak_multiplier": p.trailing_peak_multiplier,
-                "tp1_hit": p.tp1_hit,
-                "tp2_hit": p.tp2_hit,
-                "tp3_hit": p.tp3_hit,
-                "total_sol_received": p.total_sol_received,
-                "partial_exits": [
-                    {k: str(v) if isinstance(v, datetime) else v for k, v in e.items()}
-                    for e in p.partial_exits
-                ],
-            }
+        data = {pid: _pos_to_dict(p) for pid, p in positions.items() if not p.closed}
         with open(POSITIONS_FILE, "w") as f:
             json.dump(data, f)
     except Exception as exc:
-        logger.warning("Failed to save positions: %s", exc)
+        logger.warning("File save failed: %s", exc)
 
 
-def _load_positions() -> dict:
+def _file_load() -> dict:
     if not os.path.exists(POSITIONS_FILE):
         return {}
     try:
         with open(POSITIONS_FILE) as f:
             data = json.load(f)
-        positions = {}
-        for pid, d in data.items():
-            p = Position(
-                position_id=d["position_id"],
-                mint=d["mint"],
-                symbol=d["symbol"],
-                entry_price_usd=d["entry_price_usd"],
-                entry_time=datetime.fromisoformat(d["entry_time"]),
-                initial_tokens=d["initial_tokens"],
-                remaining_tokens=d["remaining_tokens"],
-                initial_sol=d["initial_sol"],
-                reason=d["reason"],
-                score_breakdown=d.get("score_breakdown"),
-                decimals=d.get("decimals", 6),
-                peak_multiplier=d.get("peak_multiplier", 1.0),
-                trailing_active=d.get("trailing_active", False),
-                trailing_peak_multiplier=d.get("trailing_peak_multiplier", 1.0),
-                tp1_hit=d.get("tp1_hit", False),
-                tp2_hit=d.get("tp2_hit", False),
-                tp3_hit=d.get("tp3_hit", False),
-                total_sol_received=d.get("total_sol_received", 0.0),
-            )
-            positions[pid] = p
-        logger.info("Loaded %d open position(s) from disk", len(positions))
+        positions = {pid: _dict_to_pos(d) for pid, d in data.items()}
+        logger.info("Loaded %d position(s) from file", len(positions))
         return positions
     except Exception as exc:
-        logger.warning("Failed to load positions from disk: %s", exc)
+        logger.warning("File load failed: %s", exc)
         return {}
 
+
+# ── PostgreSQL store ──────────────────────────────────────────────────────────
+
+class PositionStore:
+    """
+    Persists positions in PostgreSQL when DATABASE_URL is set,
+    otherwise falls back to a local JSON file.
+    Positions survive Railway restarts and redeploys either way.
+    """
+
+    def __init__(self) -> None:
+        self._pool = None
+
+    async def initialize(self) -> None:
+        if not DATABASE_URL:
+            logger.warning("DATABASE_URL not set — using file fallback (positions lost on redeploy)")
+            return
+        try:
+            import asyncpg
+            self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
+            async with self._pool.acquire() as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS positions (
+                        position_id TEXT PRIMARY KEY,
+                        data        JSONB    NOT NULL,
+                        closed      BOOLEAN  NOT NULL DEFAULT FALSE,
+                        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+            logger.info("PostgreSQL position store ready")
+        except Exception as exc:
+            logger.error("PostgreSQL init failed, using file fallback: %s", exc)
+            self._pool = None
+
+    async def save(self, position: "Position") -> None:
+        if self._pool is None:
+            return  # file save handled by caller
+        try:
+            data = json.dumps(_pos_to_dict(position))
+            async with self._pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO positions (position_id, data, closed, updated_at)
+                    VALUES ($1, $2::jsonb, $3, NOW())
+                    ON CONFLICT (position_id)
+                    DO UPDATE SET data=EXCLUDED.data, closed=EXCLUDED.closed, updated_at=NOW()
+                """, position.position_id, data, position.closed)
+        except Exception as exc:
+            logger.warning("DB save failed: %s", exc)
+
+    async def load_all(self) -> dict:
+        if self._pool is None:
+            return _file_load()
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT data FROM positions WHERE closed = FALSE"
+                )
+            positions = {}
+            for row in rows:
+                d = json.loads(row["data"])
+                p = _dict_to_pos(d)
+                positions[p.position_id] = p
+            logger.info("Loaded %d open position(s) from PostgreSQL", len(positions))
+            return positions
+        except Exception as exc:
+            logger.warning("DB load failed, trying file: %s", exc)
+            return _file_load()
+
+
+# ── Data model ────────────────────────────────────────────────────────────────
 
 @dataclass
 class Position:
@@ -127,15 +203,28 @@ class Position:
     closed: bool = False
     total_sol_received: float = 0.0
     partial_exits: list[dict[str, Any]] = field(default_factory=list)
-    price_miss_count: int = 0  # consecutive price fetch failures
+    price_miss_count: int = 0
 
+
+# ── Risk Manager ─────────────────────────────────────────────────────────────
 
 class RiskManager:
     def __init__(self, executor: "Executor", alerter: Alerter) -> None:
         self.executor = executor
-        self.alerter = alerter
-        self.positions: dict[str, Position] = _load_positions()
+        self.alerter  = alerter
+        self.store    = PositionStore()
+        self.positions: dict[str, Position] = {}
         self._running = False
+
+    async def initialize(self) -> None:
+        await self.store.initialize()
+        self.positions = await self.store.load_all()
+
+    async def _persist(self, position: Position) -> None:
+        if self.store._pool is not None:
+            await self.store.save(position)
+        else:
+            _file_save(self.positions)
 
     async def open_position(self, buy: "BuyResult") -> None:
         if not buy.success or buy.tokens_received <= 0:
@@ -154,12 +243,10 @@ class RiskManager:
             score_breakdown=buy.score_breakdown,
         )
         self.positions[buy.position_id] = position
-        _save_positions(self.positions)
+        await self._persist(position)
         logger.info(
             "Position opened — %s | %.4f tokens @ $%.8f | monitoring started",
-            buy.symbol,
-            buy.tokens_received,
-            buy.entry_price_usd,
+            buy.symbol, buy.tokens_received, buy.entry_price_usd,
         )
 
     def _current_multiplier(self, position: Position, current_price: float) -> float:
@@ -167,16 +254,10 @@ class RiskManager:
             return 1.0
         return current_price / position.entry_price_usd
 
-    async def _sell_partial(
-        self,
-        position: Position,
-        sell_pct_of_remaining: float,
-        exit_reason: str,
-    ) -> float:
+    async def _sell_partial(self, position: Position, sell_pct: float, exit_reason: str) -> float:
         if position.remaining_tokens <= 0:
             return 0.0
-
-        tokens_to_sell = position.remaining_tokens * (sell_pct_of_remaining / 100.0)
+        tokens_to_sell = position.remaining_tokens * (sell_pct / 100.0)
         if tokens_to_sell <= 0:
             return 0.0
 
@@ -185,28 +266,20 @@ class RiskManager:
             amount_tokens=tokens_to_sell,
             decimals=position.decimals,
             symbol=position.symbol,
-            sell_pct=sell_pct_of_remaining,
+            sell_pct=sell_pct,
         )
-
         if sell_result.success:
             position.remaining_tokens -= tokens_to_sell
             position.total_sol_received += sell_result.sol_received
-            position.partial_exits.append(
-                {
-                    "reason": exit_reason,
-                    "tokens": tokens_to_sell,
-                    "sol": sell_result.sol_received,
-                    "time": datetime.now(timezone.utc),
-                }
-            )
-            _save_positions(self.positions)
-            logger.info(
-                "Partial sell — %s | %s | %.2f%% | %.4f SOL",
-                position.symbol,
-                exit_reason,
-                sell_pct_of_remaining,
-                sell_result.sol_received,
-            )
+            position.partial_exits.append({
+                "reason": exit_reason,
+                "tokens": tokens_to_sell,
+                "sol": sell_result.sol_received,
+                "time": datetime.now(timezone.utc),
+            })
+            await self._persist(position)
+            logger.info("Partial sell — %s | %s | %.2f%% | %.4f SOL",
+                        position.symbol, exit_reason, sell_pct, sell_result.sol_received)
             return sell_result.sol_received
         return 0.0
 
@@ -218,11 +291,12 @@ class RiskManager:
             await self._sell_partial(position, 100.0, exit_reason)
 
         position.closed = True
-        _save_positions(self.positions)
+        await self._persist(position)
+
         exit_time = datetime.now(timezone.utc)
-        pnl_sol = position.total_sol_received - position.initial_sol
+        pnl_sol   = position.total_sol_received - position.initial_sol
         sol_price = await self.executor.get_sol_price_usd()
-        pnl_usd = pnl_sol * sol_price
+        pnl_usd   = pnl_sol * sol_price
 
         alert = TradeAlert(
             token_mint=position.mint,
@@ -242,14 +316,9 @@ class RiskManager:
         await self.alerter.send_trade_alert(alert)
 
         hold_time = (exit_time - position.entry_time).total_seconds()
-        logger.info(
-            "Position closed — %s | %s | hold %s | PnL %.4f SOL | peak %.2fx",
-            position.symbol,
-            exit_reason,
-            format_duration(hold_time),
-            pnl_sol,
-            position.peak_multiplier,
-        )
+        logger.info("Position closed — %s | %s | hold %s | PnL %.4f SOL | peak %.2fx",
+                    position.symbol, exit_reason, format_duration(hold_time), pnl_sol,
+                    position.peak_multiplier)
 
     async def _evaluate_position(self, position: Position) -> None:
         if position.closed:
@@ -258,23 +327,20 @@ class RiskManager:
         current_price = await self.executor.get_token_price_usd(position.mint)
         if not current_price or current_price <= 0:
             position.price_miss_count += 1
-            # Force-sell after 10 consecutive price failures (~50s) — token is likely dead/illiquid
+            # Force-sell after 10 consecutive price failures (~50s) — token is dead/illiquid
             if position.price_miss_count >= 10:
-                logger.warning(
-                    "Force-selling %s — price unavailable for %d consecutive checks",
-                    position.symbol, position.price_miss_count,
-                )
+                logger.warning("Force-selling %s — no price data for %d checks",
+                               position.symbol, position.price_miss_count)
                 await self._close_position(position, "no_price_data", position.entry_price_usd)
             return
-        position.price_miss_count = 0  # reset on successful price fetch
+        position.price_miss_count = 0
 
-        multiplier = self._current_multiplier(position, current_price)
+        multiplier   = self._current_multiplier(position, current_price)
         position.peak_multiplier = max(position.peak_multiplier, multiplier)
-
-        pnl_pct = (multiplier - 1.0) * 100.0
+        pnl_pct      = (multiplier - 1.0) * 100.0
         hold_minutes = (datetime.now(timezone.utc) - position.entry_time).total_seconds() / 60.0
 
-        # Full stop loss at -25%
+        # Stop loss -25%
         if pnl_pct <= STOP_LOSS_PCT:
             await self._close_position(position, "SL", current_price)
             return
@@ -284,21 +350,20 @@ class RiskManager:
             position.trailing_active = True
             position.trailing_peak_multiplier = max(position.trailing_peak_multiplier, multiplier)
 
-        # Trailing stop: -18% from peak after 3x
+        # Trailing stop -18% from peak
         if position.trailing_active:
-            drawdown_from_peak = (
-                (multiplier - position.trailing_peak_multiplier) / position.trailing_peak_multiplier
-            ) * 100.0
-            if drawdown_from_peak <= TRAILING_STOP_PCT:
+            drawdown = ((multiplier - position.trailing_peak_multiplier)
+                        / position.trailing_peak_multiplier) * 100.0
+            if drawdown <= TRAILING_STOP_PCT:
                 await self._close_position(position, "trailing", current_price)
                 return
 
-        # Time stop: 45 min if under 1.5x
+        # Time stop: 45 min under 1.5x
         if hold_minutes >= TIME_STOP_MINUTES and multiplier < TIME_STOP_MIN_MULTIPLIER:
             await self._close_position(position, "time_stop", current_price)
             return
 
-        # Take profit levels
+        # Take profits
         if multiplier >= TP1_MULTIPLIER and not position.tp1_hit:
             position.tp1_hit = True
             await self._sell_partial(position, TP1_SELL_PCT, "TP1")
@@ -328,7 +393,6 @@ class RiskManager:
                     )
             except Exception as exc:
                 logger.error("Risk manager loop error: %s", exc)
-
             await asyncio.sleep(RISK_POLL_INTERVAL_SECONDS)
 
     def stop(self) -> None:
