@@ -16,13 +16,16 @@ class TraderConfig:
 
 
 TRADERS: list[TraderConfig] = [
-    TraderConfig("Cented", "@cented7", "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o", 0.05),
-    TraderConfig("trunoest", "@trunoest", "ardinRsN1mNYVeoJWTBsWeYeXvuR9UUDGMsCDKpb6AT", 0.1),
-    TraderConfig("Cupsey", "@cupseyy", "suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK", 0.1),
-    TraderConfig("Cupsey", "@cupseyy", "2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f", 0.1),
-    TraderConfig("Radiance", "@radiancebrr", "FAicXNV5FVqtfbpn4Zccs71XcfGeyxBSGbqLDyDJZjke", 0.1),
-    TraderConfig("HeyItsYolo", "@heyitsyolotv", "Av3xWHJ5EsoLZag6pr7LKbrGgLRTaykXomDD5kBhL9YQ", 0.05),
-    TraderConfig("Colercooks", "@colercooks", "99xnE2zEFi8YhmKDaikc1EvH6ELTQJppnqUwMzmpLXrs", 0.1),
+    # GMGN-vetted — milkybids filters: 60%+ WR, 50%+ 30d PnL, <200 txns
+    TraderConfig("AU73", "@gmgn", "AU73C47eNaF5yhpAgB2CtYqPxREGsXQkSsbqgahEYW6h", 0.05),   # 65.5% WR, 63 txns
+    TraderConfig("flock", "@gmgn", "F1WT79Jkw3BkBDUfCbrKKo15ghZNCEjvnjxQpiCfPuRM", 0.05),  # 60% WR, 11 txns
+    TraderConfig("sarah", "@gmgn", "AAMnoNo3TpezKcT7ah9puLFZ4D59muEhQHJJqpX16ccg", 0.05),  # 66.7% WR, 3 txns
+    TraderConfig("insentos", "@gmgn", "7SDs3PjT2mswKQ7Zo4FTucn9gJdtuW4jaacPA65BseHS", 0.05),
+    TraderConfig("Randall", "@gmgn", "CgEnthZP1pRQqwVtiwmdeLNLyRpngZ1oLDyEUZU5bzGv", 0.05),  # 5 txns
+    # Small sample — lower conviction, same small size
+    TraderConfig("lucacadalo", "@gmgn", "4eoNFTnDaucjCNTgTx8aSz9iLskJ63gvq6p86ithjYD8", 0.05),
+    TraderConfig("Leafswan", "@gmgn", "c6w4EhWt9ca7mqqQHfgvZMU8cKT9w1cfkwdYhQMoRfS", 0.05),
+    TraderConfig("Marcell", "@gmgn", "ATFRUwvyMh61w2Ab6AZxUyxsAfiiuG1RqL6iv3Vi9q2B", 0.05),
 ]
 
 TRADER_BY_ADDRESS: dict[str, TraderConfig] = {t.address: t for t in TRADERS}
