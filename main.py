@@ -30,7 +30,12 @@ async def main() -> None:
     if not config.HELIUS_API_KEY or config.HELIUS_API_KEY.startswith("your_"):
         logger.warning("HELIUS_API_KEY not set — wallet tracking will fail")
 
-    async with aiohttp.ClientSession() as session:
+    # Force Google DNS — Railway's default DNS can't resolve jup.ag domains
+    connector = aiohttp.TCPConnector(
+        resolver=aiohttp.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1"]),
+        ttl_dns_cache=300,
+    )
+    async with aiohttp.ClientSession(connector=connector) as session:
         alerter = Alerter(session)
         executor = Executor(session)
         risk_manager = RiskManager(executor=executor, alerter=alerter)
