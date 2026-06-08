@@ -36,23 +36,29 @@ class WalletTracker:
         self._seen_signatures: dict[str, set[str]] = {t.address: set() for t in TRADERS}
         self._running = False
 
-    async def _fetch_transactions(self, address: str) -> list[dict[str, Any]]:
+    async def _fetch_transactions(self, address: str) -> list[dict[str, Any]] | None:
         url = HELIUS_TX_URL.format(address=address)
         params = {
             "api-key": HELIUS_API_KEY,
-            "limit": 10,
+            "limit": 5,   # reduced from 10 to cut request weight
             "type": "SWAP",
         }
-        data = await fetch_json(
-            self.session,
-            "GET",
-            url,
-            params=params,
-            label=f"Helius tx fetch {address[:8]}",
-        )
-        if isinstance(data, list):
-            return data
-        return data.get("data", data) if isinstance(data, dict) else []
+        try:
+            async with self.session.get(
+                url, params=params, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 429:
+                    logger.warning("Helius 429 — backing off 30s")
+                    return None
+                if resp.status != 200:
+                    return []
+                data = await resp.json(content_type=None)
+            if isinstance(data, list):
+                return data
+            return data.get("data", data) if isinstance(data, dict) else []
+        except Exception as exc:
+            logger.warning("Helius fetch error %s: %s", address[:8], exc)
+            return []
 
     def _estimate_sol_spent(self, tx: dict[str, Any], trader_address: str) -> float:
         sol_spent = 0.0
@@ -183,6 +189,9 @@ class WalletTracker:
     async def _poll_wallet(self, trader_address: str) -> None:
         try:
             transactions = await self._fetch_transactions(trader_address)
+            if transactions is None:  # 429 returned None
+                await asyncio.sleep(30)  # back off 30s on rate limit
+                return
             if not transactions:
                 return
 
@@ -231,9 +240,9 @@ class WalletTracker:
                 if not self._running:
                     break
                 await self._poll_wallet(trader.address)
-                await asyncio.sleep(3.0)  # sequential — one wallet at a time, 3s gap
-            # extra rest after full cycle to stay under Helius free tier
-            await asyncio.sleep(15.0)
+                await asyncio.sleep(5.0)  # 8 wallets × 5s = 40s per cycle
+            # rest after full cycle — total ~70s between full sweeps
+            await asyncio.sleep(30.0)
 
     def stop(self) -> None:
         self._running = False
