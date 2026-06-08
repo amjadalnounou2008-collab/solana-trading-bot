@@ -20,6 +20,10 @@ from config import (
 )
 from modules.utils import clamp, fetch_json
 
+GMGN_TRENDING_URL = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h"
+GMGN_SIGNALS_URL  = "https://gmgn.ai/defi/quotation/v1/signals/sol"
+GMGN_TOKEN_URL    = "https://gmgn.ai/defi/quotation/v1/tokens/sol/{mint}"
+
 if TYPE_CHECKING:
     from modules.executor import Executor
 
@@ -280,27 +284,118 @@ class CoinScanner:
                 score_breakdown=breakdown,
             )
 
-    async def _scan_cycle(self) -> None:
-        profiles = await self._fetch_latest_profiles()
-        solana_tokens = []
-        for profile in profiles:
-            mint = profile.get("tokenAddress", "")
-            if mint and mint not in self._seen_mints:
-                solana_tokens.append(mint)
+    async def _fetch_gmgn_trending(self) -> list[str]:
+        """Fetch trending tokens from GMGN ranked by 1h swap volume."""
+        try:
+            params = {
+                "limit": "20",
+                "orderby": "swaps",
+                "direction": "desc",
+                "filters[]": ["renounced", "frozen"],
+            }
+            headers = {"User-Agent": "Mozilla/5.0"}
+            data = await fetch_json(
+                self.session, "GET", GMGN_TRENDING_URL,
+                params=params, headers=headers, label="GMGN trending",
+            )
+            tokens = data.get("data", {}).get("rank", []) or []
+            mints = [t.get("address", "") for t in tokens if t.get("address")]
+            logger.info("GMGN trending: %d tokens", len(mints))
+            return mints
+        except Exception as exc:
+            logger.warning("GMGN trending fetch failed: %s", exc)
+            return []
 
+    async def _fetch_gmgn_signals(self) -> list[str]:
+        """Fetch smart money buy signals from GMGN."""
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            data = await fetch_json(
+                self.session, "GET", GMGN_SIGNALS_URL,
+                headers=headers, label="GMGN signals",
+            )
+            signals = data.get("data", []) or []
+            mints = [s.get("token_address", "") for s in signals if s.get("token_address")]
+            if mints:
+                logger.info("GMGN smart money signals: %d token(s)", len(mints))
+            return mints
+        except Exception as exc:
+            logger.warning("GMGN signals fetch failed: %s", exc)
+            return []
+
+    async def _evaluate_gmgn_token(self, mint: str, source: str) -> None:
+        """Evaluate a GMGN-sourced token — uses lower score threshold since pre-filtered."""
+        if mint in self._seen_mints:
+            return
+        self._seen_mints.add(mint)
+
+        try:
+            pair = await self._fetch_pair_data(mint)
+            if not pair:
+                return
+
+            symbol = pair.get("baseToken", {}).get("symbol", "UNKNOWN")
+            rugcheck_ok, rugcheck_score = await self._rugcheck_score(mint)
+            if not rugcheck_ok:
+                logger.info("GMGN skip %s — RugCheck flagged", symbol)
+                return
+
+            birdeye = await self._birdeye_data(mint)
+            twitter_mentions = await self._twitter_mentions(symbol)
+            score, breakdown = self._score_token(pair, rugcheck_ok, rugcheck_score, birdeye, twitter_mentions)
+
+            # GMGN tokens get a 10-point boost — pre-filtered by smart money
+            boosted_score = min(score + 10, 100)
+            logger.info(
+                "GMGN [%s] %s (%s) — score %d/100 (boosted from %d) | liq $%s",
+                source, symbol, mint[:8], boosted_score, score,
+                f"{float(pair.get('liquidity', {}).get('usd', 0) or 0):,.0f}",
+            )
+
+            threshold = SCAN_MIN_SCORE - 5  # slightly lower threshold for GMGN (57)
+            if boosted_score >= threshold:
+                reason = f"GMGN {source} — score {boosted_score}/100 (raw {score}, threshold {threshold})"
+                logger.info("BUY signal from GMGN [%s] — %s scored %d", source, symbol, boosted_score)
+                await self.executor.buy_token(
+                    mint=mint,
+                    amount_sol=DEFAULT_BUY_SOL,
+                    reason=reason,
+                    symbol=symbol,
+                    score_breakdown=breakdown,
+                )
+        except Exception as exc:
+            logger.error("Error evaluating GMGN token %s: %s", mint[:8], exc)
+
+    async def _scan_cycle(self) -> None:
+        # ── DexScreener scan ──────────────────────────────────────────────────
+        profiles = await self._fetch_latest_profiles()
+        solana_tokens = [
+            p.get("tokenAddress", "") for p in profiles
+            if p.get("tokenAddress") and p.get("tokenAddress") not in self._seen_mints
+        ]
         if solana_tokens:
             logger.info("Scanner found %d new Solana token(s) to evaluate", len(solana_tokens))
-
         for mint in solana_tokens[:15]:
             try:
                 await self._evaluate_token(mint)
             except Exception as exc:
                 logger.error("Error evaluating %s: %s", mint[:8], exc)
 
+        # ── GMGN scan ─────────────────────────────────────────────────────────
+        gmgn_trending = await self._fetch_gmgn_trending()
+        for mint in gmgn_trending[:10]:
+            await self._evaluate_gmgn_token(mint, "trending")
+            await asyncio.sleep(0.5)
+
+        gmgn_signals = await self._fetch_gmgn_signals()
+        for mint in gmgn_signals[:5]:
+            await self._evaluate_gmgn_token(mint, "smart_money")
+            await asyncio.sleep(0.5)
+
     async def run(self) -> None:
         self._running = True
         logger.info(
-            "Coin scanner started — scanning DexScreener every %ds (min score %d)",
+            "Coin scanner started — DexScreener + GMGN every %ds (min score %d)",
             SCAN_INTERVAL_SECONDS,
             SCAN_MIN_SCORE,
         )
