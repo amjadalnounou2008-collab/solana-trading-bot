@@ -231,7 +231,7 @@ class WalletTracker:
                 if not self._running:
                     break
                 await self._poll_wallet(trader.address)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
             await asyncio.sleep(WALLET_POLL_INTERVAL_SECONDS)
 
     def stop(self) -> None:
