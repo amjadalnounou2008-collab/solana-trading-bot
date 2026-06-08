@@ -71,17 +71,17 @@ WALLET_POLL_INTERVAL_SECONDS = 5
 
 # Risk manager settings
 RISK_POLL_INTERVAL_SECONDS = 5
-TP1_MULTIPLIER = 2.0
-TP2_MULTIPLIER = 5.0
-TP3_MULTIPLIER = 10.0
-TP1_SELL_PCT = 34.0
-TP2_SELL_PCT = 33.0
-TP3_SELL_PCT = 33.0
-STOP_LOSS_PCT = -25.0
-TRAILING_STOP_PCT = -18.0
+TP1_MULTIPLIER = 2.0      # sell 25% at 2x — lock in quick profit
+TP2_MULTIPLIER = 5.0      # sell 25% at 5x — let the rest ride
+TP3_MULTIPLIER = 20.0     # sell 25% at 20x — catch the moonshots
+TP1_SELL_PCT = 25.0
+TP2_SELL_PCT = 25.0
+TP3_SELL_PCT = 25.0       # keeps 25% riding with trailing stop for 100x+
+STOP_LOSS_PCT = -20.0     # tighter stop — cut losses faster
+TRAILING_STOP_PCT = -15.0 # tighter trailing — protect gains after big pump
 TRAILING_ACTIVATION_MULTIPLIER = 3.0
-TIME_STOP_MINUTES = 45
-TIME_STOP_MIN_MULTIPLIER = 1.5
+TIME_STOP_MINUTES = 30    # dump faster if not moving (30 min instead of 45)
+TIME_STOP_MIN_MULTIPLIER = 1.3  # needs at least 1.3x in 30 min or we exit
 
 # General
 MAX_RETRIES = 3
