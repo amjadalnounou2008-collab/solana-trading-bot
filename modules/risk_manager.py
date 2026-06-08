@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -27,6 +29,80 @@ if TYPE_CHECKING:
     from modules.executor import BuyResult, Executor
 
 logger = logging.getLogger("solana-bot.risk_manager")
+
+POSITIONS_FILE = "positions.json"
+
+
+def _save_positions(positions: dict) -> None:
+    try:
+        data = {}
+        for pid, p in positions.items():
+            if p.closed:
+                continue
+            data[pid] = {
+                "position_id": p.position_id,
+                "mint": p.mint,
+                "symbol": p.symbol,
+                "entry_price_usd": p.entry_price_usd,
+                "entry_time": p.entry_time.isoformat(),
+                "initial_tokens": p.initial_tokens,
+                "remaining_tokens": p.remaining_tokens,
+                "initial_sol": p.initial_sol,
+                "reason": p.reason,
+                "score_breakdown": p.score_breakdown,
+                "decimals": p.decimals,
+                "peak_multiplier": p.peak_multiplier,
+                "trailing_active": p.trailing_active,
+                "trailing_peak_multiplier": p.trailing_peak_multiplier,
+                "tp1_hit": p.tp1_hit,
+                "tp2_hit": p.tp2_hit,
+                "tp3_hit": p.tp3_hit,
+                "total_sol_received": p.total_sol_received,
+                "partial_exits": [
+                    {k: str(v) if isinstance(v, datetime) else v for k, v in e.items()}
+                    for e in p.partial_exits
+                ],
+            }
+        with open(POSITIONS_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as exc:
+        logger.warning("Failed to save positions: %s", exc)
+
+
+def _load_positions() -> dict:
+    if not os.path.exists(POSITIONS_FILE):
+        return {}
+    try:
+        with open(POSITIONS_FILE) as f:
+            data = json.load(f)
+        positions = {}
+        for pid, d in data.items():
+            p = Position(
+                position_id=d["position_id"],
+                mint=d["mint"],
+                symbol=d["symbol"],
+                entry_price_usd=d["entry_price_usd"],
+                entry_time=datetime.fromisoformat(d["entry_time"]),
+                initial_tokens=d["initial_tokens"],
+                remaining_tokens=d["remaining_tokens"],
+                initial_sol=d["initial_sol"],
+                reason=d["reason"],
+                score_breakdown=d.get("score_breakdown"),
+                decimals=d.get("decimals", 6),
+                peak_multiplier=d.get("peak_multiplier", 1.0),
+                trailing_active=d.get("trailing_active", False),
+                trailing_peak_multiplier=d.get("trailing_peak_multiplier", 1.0),
+                tp1_hit=d.get("tp1_hit", False),
+                tp2_hit=d.get("tp2_hit", False),
+                tp3_hit=d.get("tp3_hit", False),
+                total_sol_received=d.get("total_sol_received", 0.0),
+            )
+            positions[pid] = p
+        logger.info("Loaded %d open position(s) from disk", len(positions))
+        return positions
+    except Exception as exc:
+        logger.warning("Failed to load positions from disk: %s", exc)
+        return {}
 
 
 @dataclass
@@ -57,7 +133,7 @@ class RiskManager:
     def __init__(self, executor: "Executor", alerter: Alerter) -> None:
         self.executor = executor
         self.alerter = alerter
-        self.positions: dict[str, Position] = {}
+        self.positions: dict[str, Position] = _load_positions()
         self._running = False
 
     async def open_position(self, buy: "BuyResult") -> None:
@@ -77,6 +153,7 @@ class RiskManager:
             score_breakdown=buy.score_breakdown,
         )
         self.positions[buy.position_id] = position
+        _save_positions(self.positions)
         logger.info(
             "Position opened — %s | %.4f tokens @ $%.8f | monitoring started",
             buy.symbol,
@@ -121,6 +198,7 @@ class RiskManager:
                     "time": datetime.now(timezone.utc),
                 }
             )
+            _save_positions(self.positions)
             logger.info(
                 "Partial sell — %s | %s | %.2f%% | %.4f SOL",
                 position.symbol,
@@ -139,6 +217,7 @@ class RiskManager:
             await self._sell_partial(position, 100.0, exit_reason)
 
         position.closed = True
+        _save_positions(self.positions)
         exit_time = datetime.now(timezone.utc)
         pnl_sol = position.total_sol_received - position.initial_sol
         sol_price = await self.executor.get_sol_price_usd()
