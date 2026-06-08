@@ -108,6 +108,9 @@ MAX_HOLD_MINUTES = 45         # never hold longer than 45 min — force sell
 # General
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.5
+JUPITER_MIN_INTERVAL_SEC = 1.5       # min gap between Jupiter quote/swap calls
+JUPITER_429_RETRIES = 5              # extra retries when rate-limited
+BUY_MINT_COOLDOWN_SEC = 300          # don't buy same token again within 5 min
 DEFAULT_SLIPPAGE_BPS = 300
 SELL_SLIPPAGE_BPS = 1000          # 10% slippage on sells — meme coins move fast
 SELL_SLIPPAGE_RETRY_BPS = [1000, 2500, 5000, 10000]

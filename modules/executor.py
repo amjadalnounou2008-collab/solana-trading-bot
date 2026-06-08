@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,12 +16,15 @@ from solders.transaction import VersionedTransaction
 
 import config
 from config import (
+    BUY_MINT_COOLDOWN_SEC,
     DEFAULT_SLIPPAGE_BPS,
     DUST_BALANCE_USD,
     EXIT_DECIMALS,
     EXIT_LABELS,
     EXIT_MINTS,
     HELIUS_RPC_URL,
+    JUPITER_MIN_INTERVAL_SEC,
+    JUPITER_429_RETRIES,
     JUPITER_PRICE_URL,
     JUPITER_QUOTE_URL,
     JUPITER_SWAP_URL,
@@ -81,6 +86,60 @@ class Executor:
         self._sol_price_usd = 150.0
         self._sol_price_last_fetch = 0.0
         self._token_price_cache: dict[str, tuple[float, float | None]] = {}
+        self._jupiter_lock = asyncio.Lock()
+        self._jupiter_last_call = 0.0
+        self._buy_in_flight: set[str] = set()
+        self._recent_buys: dict[str, float] = {}  # mint → unix time
+
+    def can_buy_mint(self, mint: str) -> tuple[bool, str]:
+        if mint in self._buy_in_flight:
+            return False, "buy already in progress"
+        last = self._recent_buys.get(mint, 0)
+        if time.time() - last < BUY_MINT_COOLDOWN_SEC:
+            return False, f"bought recently ({BUY_MINT_COOLDOWN_SEC // 60}m cooldown)"
+        rm = self.risk_manager
+        if rm:
+            if rm.is_holding(mint):
+                return False, "already holding"
+            if rm.on_cooldown(mint):
+                return False, "on loss cooldown"
+        return True, ""
+
+    async def _throttle_jupiter(self) -> None:
+        async with self._jupiter_lock:
+            elapsed = time.time() - self._jupiter_last_call
+            if elapsed < JUPITER_MIN_INTERVAL_SEC:
+                await asyncio.sleep(JUPITER_MIN_INTERVAL_SEC - elapsed)
+            self._jupiter_last_call = time.time()
+
+    async def _jupiter_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict | None = None,
+        json_body: dict | None = None,
+        label: str = "Jupiter",
+    ) -> dict[str, Any]:
+        for attempt in range(1, JUPITER_429_RETRIES + 1):
+            await self._throttle_jupiter()
+            async with self.session.request(
+                method, url,
+                params=params, json=json_body,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 429:
+                    wait = min(30, 3 * (2 ** (attempt - 1)))
+                    logger.warning("%s 429 — backing off %ds (attempt %d/%d)",
+                                   label, wait, attempt, JUPITER_429_RETRIES)
+                    await asyncio.sleep(wait)
+                    continue
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(f"{label} HTTP {resp.status}: {body[:200]}")
+                return await resp.json()
+
+        raise RuntimeError(f"{label} rate-limited after {JUPITER_429_RETRIES} retries")
 
     def _load_keypair(self) -> Keypair | None:
         if not WALLET_PRIVATE_KEY or WALLET_PRIVATE_KEY.startswith("your_"):
@@ -235,12 +294,8 @@ class Executor:
             "amount": str(amount),
             "slippageBps": str(slippage_bps),
         }
-        return await fetch_json(
-            self.session,
-            "GET",
-            JUPITER_QUOTE_URL,
-            params=params,
-            label="Jupiter quote",
+        return await self._jupiter_request(
+            "GET", JUPITER_QUOTE_URL, params=params, label="Jupiter quote",
         )
 
     async def execute_swap(
@@ -262,12 +317,8 @@ class Executor:
             "dynamicComputeUnitLimit": True,
             "prioritizationFeeLamports": priority_fee,
         }
-        swap_data = await fetch_json(
-            self.session,
-            "POST",
-            JUPITER_SWAP_URL,
-            json_body=payload,
-            label="Jupiter swap build",
+        swap_data = await self._jupiter_request(
+            "POST", JUPITER_SWAP_URL, json_body=payload, label="Jupiter swap",
         )
         swap_tx_b64 = swap_data.get("swapTransaction")
         if not swap_tx_b64:
@@ -309,6 +360,16 @@ class Executor:
     ) -> BuyResult:
         logger.info("BUY signal — %s (%s) for %.4f SOL — %s", symbol, mint[:8], amount_sol, reason)
 
+        ok, skip_reason = self.can_buy_mint(mint)
+        if not ok:
+            logger.info("BUY skip %s — %s", symbol, skip_reason)
+            return BuyResult(
+                success=False, mint=mint, symbol=symbol, amount_sol=amount_sol,
+                tokens_received=0, entry_price_usd=0, tx_signature=None,
+                reason=reason, score_breakdown=score_breakdown,
+            )
+
+        self._buy_in_flight.add(mint)
         lamports = sol_to_lamports(amount_sol)
 
         try:
@@ -350,6 +411,7 @@ class Executor:
                 except Exception:
                     pass
 
+            self._recent_buys[mint] = time.time()
             logger.info(
                 "BUY complete — %s received %.4f tokens @ $%.8f (tx: %s)",
                 symbol,
@@ -360,12 +422,15 @@ class Executor:
             return result
 
         except Exception as exc:
+            err = str(exc)
             logger.error("BUY failed for %s: %s", mint[:8], exc)
-            if self.risk_manager:
+            # Don't spam Telegram for rate limits or duplicate attempts
+            alert = "429" not in err and "rate" not in err.lower()
+            if alert and self.risk_manager:
                 try:
                     await self.risk_manager.alerter.send_message(
                         f"❌ <b>BUY FAILED — {symbol}</b>\n"
-                        f"Error: {str(exc)[:200]}"
+                        f"Error: {err[:200]}"
                     )
                 except Exception:
                     pass
@@ -380,6 +445,8 @@ class Executor:
                 reason=reason,
                 score_breakdown=score_breakdown,
             )
+        finally:
+            self._buy_in_flight.discard(mint)
 
     async def sell_token(
         self,

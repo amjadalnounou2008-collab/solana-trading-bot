@@ -222,6 +222,9 @@ class RiskManager:
         self._running = False
         self._loss_cooldown: dict[str, datetime] = {}  # mint → don't rebuy until expired
 
+    def is_holding(self, mint: str) -> bool:
+        return any(not p.closed and p.mint == mint for p in self.positions.values())
+
     def on_cooldown(self, mint: str) -> bool:
         until = self._loss_cooldown.get(mint)
         if not until:

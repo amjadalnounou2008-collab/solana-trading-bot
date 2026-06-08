@@ -415,6 +415,11 @@ class CoinScanner:
             from config import LAMPORTS_PER_SOL
             from modules.utils import sol_to_lamports
 
+            can_buy, skip = self.executor.can_buy_mint(mint)
+            if not can_buy:
+                logger.info("Scanner skip %s (score %.0f) — %s", symbol, score, skip)
+                return
+
             buy_quote = await self.executor.get_quote(
                 SOL_MINT, mint, sol_to_lamports(SCANNER_BUY_SOL),
             )
@@ -507,6 +512,11 @@ class CoinScanner:
 
             threshold = SCAN_MIN_SCORE - 5  # slightly lower threshold for GMGN (57)
             if boosted_score >= threshold:
+                can_buy, skip = self.executor.can_buy_mint(mint)
+                if not can_buy:
+                    logger.info("GMGN skip %s — %s", symbol, skip)
+                    return
+
                 # Verify Jupiter can price this token before buying
                 jupiter_price = await self.executor.get_token_price_usd(mint)
                 if not jupiter_price or jupiter_price <= 0:

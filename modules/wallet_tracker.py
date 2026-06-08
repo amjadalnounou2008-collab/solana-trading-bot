@@ -152,9 +152,7 @@ class WalletTracker:
 
     def _already_holding(self, mint: str) -> bool:
         rm = self.executor.risk_manager
-        if not rm:
-            return False
-        return any(not p.closed and p.mint == mint for p in rm.positions.values())
+        return rm.is_holding(mint) if rm else False
 
     async def _process_transaction(self, trader_address: str, tx: dict[str, Any]) -> None:
         signature = tx.get("signature", "")
@@ -194,13 +192,9 @@ class WalletTracker:
             logger.info("Skipping — trader spent %.4f SOL (> %.0f max)", sol_spent, COPY_MAX_TRADER_SOL)
             return
 
-        if COPY_SKIP_IF_HOLDING and self._already_holding(mint):
-            logger.info("Skipping %s — already holding this token", symbol)
-            return
-
-        rm = self.executor.risk_manager
-        if rm and rm.on_cooldown(mint):
-            logger.info("Skipping %s — lost on this token recently (24h cooldown)", symbol)
+        can_buy, skip = self.executor.can_buy_mint(mint)
+        if not can_buy:
+            logger.info("Skipping %s — %s", symbol, skip)
             return
 
         if COPY_GRADUATED_ONLY:
