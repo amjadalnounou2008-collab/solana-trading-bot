@@ -309,19 +309,6 @@ class Executor:
     ) -> BuyResult:
         logger.info("BUY signal — %s (%s) for %.4f SOL — %s", symbol, mint[:8], amount_sol, reason)
 
-        # Alert immediately when signal fires — before swap attempt
-        if self.risk_manager:
-            try:
-                await self.risk_manager.alerter.send_message(
-                    f"🔔 <b>BUY SIGNAL — {symbol}</b>\n"
-                    f"Amount: {amount_sol} SOL\n"
-                    f"Reason: {reason}\n"
-                    f"Mint: <code>{mint[:16]}...</code>\n"
-                    f"Attempting swap..."
-                )
-            except Exception:
-                pass
-
         lamports = sol_to_lamports(amount_sol)
 
         try:
@@ -352,6 +339,16 @@ class Executor:
 
             if self.risk_manager:
                 await self.risk_manager.open_position(result)
+                sol_price = await self.get_sol_price_usd()
+                cost_usd = amount_sol * sol_price
+                try:
+                    await self.risk_manager.alerter.send_buy_alert(
+                        symbol=symbol, mint=mint, amount_sol=amount_sol,
+                        cost_usd=cost_usd, reason=reason, tx_sig=tx_sig,
+                        score_breakdown=score_breakdown,
+                    )
+                except Exception:
+                    pass
 
             logger.info(
                 "BUY complete — %s received %.4f tokens @ $%.8f (tx: %s)",
@@ -454,16 +451,7 @@ class Executor:
                     "SELL complete — %s sold %.4f tokens for %.4f %s (tx: %s)",
                     symbol, amount_tokens, received, exit_label, tx_sig,
                 )
-                # One alert per meaningful sell — only full exits (100%), not every partial/dust
-                if self.risk_manager and sell_pct >= 99.0 and received_usd >= MIN_SELL_VALUE_USD:
-                    try:
-                        await self.risk_manager.alerter.send_message(
-                            f"✅ <b>SOLD — {symbol}</b>\n"
-                            f"Got back: <b>${received_usd:.2f} {exit_label}</b>\n"
-                            f"Tx: <code>{tx_sig[:16]}...</code>"
-                        )
-                    except Exception:
-                        pass
+                # PnL alert sent by risk_manager on full close — no "got back" spam here
                 return SellResult(
                     success=True, mint=mint, symbol=symbol, amount_tokens=amount_tokens,
                     sol_received=received, exit_price_usd=exit_price_usd,

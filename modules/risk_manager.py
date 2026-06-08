@@ -5,10 +5,11 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from config import (
+    COPY_REBUY_COOLDOWN_HOURS,
     DUST_BALANCE_USD,
     MAX_HOLD_MINUTES,
     RISK_POLL_INTERVAL_SECONDS,
@@ -219,6 +220,16 @@ class RiskManager:
         self.store    = PositionStore()
         self.positions: dict[str, Position] = {}
         self._running = False
+        self._loss_cooldown: dict[str, datetime] = {}  # mint → don't rebuy until expired
+
+    def on_cooldown(self, mint: str) -> bool:
+        until = self._loss_cooldown.get(mint)
+        if not until:
+            return False
+        if datetime.now(timezone.utc) >= until:
+            del self._loss_cooldown[mint]
+            return False
+        return True
 
     async def initialize(self) -> None:
         await self.store.initialize()
@@ -340,6 +351,9 @@ class RiskManager:
             pnl_sol = position.total_sol_received - position.initial_sol
             pnl_usd = pnl_sol * sol_price
 
+        spent_usd = entry_usd
+        received_usd = position.total_sol_received if SELL_TO_STABLE else position.total_sol_received * sol_price
+
         alert = TradeAlert(
             token_mint=position.mint,
             token_symbol=position.symbol,
@@ -351,11 +365,16 @@ class RiskManager:
             exit_time=exit_time,
             pnl_sol=pnl_sol,
             pnl_usd=pnl_usd,
+            spent_usd=spent_usd,
+            received_usd=received_usd,
             peak_multiplier=position.peak_multiplier,
             score_breakdown=position.score_breakdown,
             sol_price_usd=sol_price,
         )
         await self.alerter.send_trade_alert(alert)
+
+        if pnl_usd < 0:
+            self._loss_cooldown[position.mint] = exit_time + timedelta(hours=COPY_REBUY_COOLDOWN_HOURS)
 
         hold_time = (exit_time - position.entry_time).total_seconds()
         logger.info("Position closed — %s | %s | hold %s | PnL %.4f SOL | peak %.2fx",

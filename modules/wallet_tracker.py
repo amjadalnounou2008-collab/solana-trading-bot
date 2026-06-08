@@ -198,6 +198,11 @@ class WalletTracker:
             logger.info("Skipping %s — already holding this token", symbol)
             return
 
+        rm = self.executor.risk_manager
+        if rm and rm.on_cooldown(mint):
+            logger.info("Skipping %s — lost on this token recently (24h cooldown)", symbol)
+            return
+
         if COPY_GRADUATED_ONLY:
             if not await self._is_graduated(mint):
                 logger.info(
@@ -231,12 +236,24 @@ class WalletTracker:
             logger.info("Skipping %s — could not verify sell route", symbol)
             return
 
-        reason = f"Copy trade from {trader.name} ({trader.handle}) — spent {sol_spent:.3f} SOL"
+        pair = await self._get_best_pair(mint)
+        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0) if pair else 0
+        dex = (pair.get("dexId") or "?") if pair else "?"
+        mcap_str = f"${market_cap:,.0f}" if market_cap else "unknown"
+        breakdown = {
+            "market_cap": mcap_str,
+            "liquidity": f"${liq:,.0f}",
+            "dex": dex,
+            "trader": f"{trader.name} ({trader.handle})",
+            "trader_spent": f"{sol_spent:.3f} SOL",
+        }
+        reason = f"Copy {trader.name} — bought {symbol}"
         await self.executor.buy_token(
             mint=mint,
             amount_sol=trader.copy_amount_sol,
             reason=reason,
             symbol=symbol,
+            score_breakdown=breakdown,
         )
 
     async def _poll_wallet(self, trader_address: str) -> None:

@@ -74,6 +74,7 @@ COPY_MAX_MARKET_CAP_USD = 800_000
 COPY_GRADUATED_ONLY = True          # only copy tokens on Raydium/Orca (left pump.fun curve)
 COPY_MIN_GRADUATED_LIQUIDITY_USD = 15_000
 COPY_SKIP_IF_HOLDING = True         # don't buy same token twice
+COPY_REBUY_COOLDOWN_HOURS = 24     # after a losing exit, don't copy-buy same token again
 
 # Scanner settings — autonomous discovery (Axiom Pulse "graduated" style)
 SCAN_INTERVAL_SECONDS  = 12
@@ -112,13 +113,11 @@ SELL_SLIPPAGE_BPS = 1000          # 10% slippage on sells — meme coins move fa
 SELL_SLIPPAGE_RETRY_BPS = [1000, 2500, 5000, 10000]
 SELL_PRIORITY_FEE_LAMPORTS = 300_000
 
-# Exits go to Phantom Cash (CASH token) — same stablecoin the Phantom app uses
-# Falls back to USDC if Jupiter has no CASH route for a meme coin
+# All sells swap to USDC (dollars) — falls back to SOL only if no USDC route
 SELL_TO_STABLE = True
-EXIT_MINTS: list[str] = [CASH_MINT, USDC_MINT] if SELL_TO_STABLE else [SOL_MINT]
-EXIT_DECIMALS: dict[str, int] = {CASH_MINT: 6, USDC_MINT: 6, SOL_MINT: 9}
+EXIT_MINTS: list[str] = [USDC_MINT] if SELL_TO_STABLE else [SOL_MINT]
+EXIT_DECIMALS: dict[str, int] = {USDC_MINT: 6, SOL_MINT: 9}
 EXIT_LABELS: dict[str, str] = {
-    CASH_MINT: "Phantom Cash",
     USDC_MINT: "USDC",
     SOL_MINT: "SOL",
 }
