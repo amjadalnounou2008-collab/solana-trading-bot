@@ -64,11 +64,11 @@ class SellResult:
     symbol: str
     amount_tokens: float
     sol_received: float       # stablecoin amount (~USD) when SELL_TO_STABLE, else SOL
-    exit_mint: str = ""
-    exit_label: str = ""
     exit_price_usd: float
     tx_signature: str | None
     sell_pct: float
+    exit_mint: str = ""
+    exit_label: str = ""
     is_dust: bool = False
 
 
