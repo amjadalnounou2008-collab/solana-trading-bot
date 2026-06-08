@@ -125,23 +125,63 @@ class Executor:
         cached_time, cached_price = self._token_price_cache.get(mint, (0, None))
         if now - cached_time < 30:
             return cached_price
+
+        result = await self._price_from_jupiter(mint)
+
+        if not result:
+            result = await self._price_from_dexscreener(mint)
+
+        if not result:
+            result = await self._price_from_gmgn(mint)
+
+        self._token_price_cache[mint] = (now, result)
+        return result
+
+    async def _price_from_jupiter(self, mint: str) -> float | None:
         try:
             data = await fetch_json(
-                self.session,
-                "GET",
-                JUPITER_PRICE_URL,
-                params={"ids": mint},
-                label=f"Token price fetch {mint[:8]}",
+                self.session, "GET", JUPITER_PRICE_URL,
+                params={"ids": mint}, label=f"Jupiter price {mint[:8]}",
             )
             price = (
                 data.get("data", {}).get(mint, {}).get("price")
                 or data.get(mint, {}).get("price")
             )
-            result = float(price) if price else None
-            self._token_price_cache[mint] = (now, result)
-            return result
+            return float(price) if price else None
         except Exception:
-            return cached_price
+            return None
+
+    async def _price_from_dexscreener(self, mint: str) -> float | None:
+        try:
+            from config import DEXSCREENER_TOKEN_URL
+            url = DEXSCREENER_TOKEN_URL.format(mint=mint)
+            data = await fetch_json(
+                self.session, "GET", url, label=f"DexScreener price {mint[:8]}",
+            )
+            pairs = data.get("pairs") or []
+            if not pairs:
+                return None
+            best = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+            price_str = best.get("priceUsd")
+            return float(price_str) if price_str else None
+        except Exception:
+            return None
+
+    async def _price_from_gmgn(self, mint: str) -> float | None:
+        try:
+            url = f"https://gmgn.ai/defi/quotation/v1/tokens/sol/{mint}"
+            headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://gmgn.ai/"}
+            data = await fetch_json(
+                self.session, "GET", url, headers=headers,
+                label=f"GMGN price {mint[:8]}",
+            )
+            price = (
+                data.get("data", {}).get("price")
+                or data.get("data", {}).get("priceUsd")
+            )
+            return float(price) if price else None
+        except Exception:
+            return None
 
     async def get_quote(
         self,
