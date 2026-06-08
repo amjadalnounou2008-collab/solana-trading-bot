@@ -274,6 +274,15 @@ class CoinScanner:
         self._seen_mints.add(mint)
 
         if score >= SCAN_MIN_SCORE:
+            # Verify Jupiter can actually price this token before buying
+            jupiter_price = await self.executor.get_token_price_usd(mint)
+            if not jupiter_price or jupiter_price <= 0:
+                logger.info(
+                    "Scanner skip %s (score %.0f) — Jupiter has no price, token not tradeable yet",
+                    symbol, score,
+                )
+                return
+
             reason = f"Autonomous discovery — score {score:.0f}/100 (threshold {SCAN_MIN_SCORE})"
             logger.info("BUY signal from scanner — %s scored %.0f", symbol, score)
             await self.executor.buy_token(
@@ -354,6 +363,15 @@ class CoinScanner:
 
             threshold = SCAN_MIN_SCORE - 5  # slightly lower threshold for GMGN (57)
             if boosted_score >= threshold:
+                # Verify Jupiter can price this token before buying
+                jupiter_price = await self.executor.get_token_price_usd(mint)
+                if not jupiter_price or jupiter_price <= 0:
+                    logger.info(
+                        "GMGN skip %s (score %d) — Jupiter has no price, skipping",
+                        symbol, boosted_score,
+                    )
+                    return
+
                 reason = f"GMGN {source} — score {boosted_score}/100 (raw {score}, threshold {threshold})"
                 logger.info("BUY signal from GMGN [%s] — %s scored %d", source, symbol, boosted_score)
                 await self.executor.buy_token(
