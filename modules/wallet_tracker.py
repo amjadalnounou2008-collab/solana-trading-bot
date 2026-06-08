@@ -16,13 +16,14 @@ from config import (
     DEXSCREENER_TOKEN_URL,
     HELIUS_API_KEY,
     HELIUS_TX_URL,
+    SELL_SLIPPAGE_BPS,
     SOL_MINT,
     TRADER_BY_ADDRESS,
     TRADERS,
     USDC_MINT,
     WALLET_POLL_INTERVAL_SECONDS,
 )
-from modules.utils import fetch_json, lamports_to_sol
+from modules.utils import fetch_json, lamports_to_sol, sol_to_lamports
 
 if TYPE_CHECKING:
     from modules.executor import Executor
@@ -211,6 +212,22 @@ class WalletTracker:
                 market_cap,
                 COPY_MAX_MARKET_CAP_USD,
             )
+            return
+
+        # Verify we can sell before copying — same check as scanner
+        try:
+            buy_quote = await self.executor.get_quote(
+                SOL_MINT, mint, sol_to_lamports(trader.copy_amount_sol),
+            )
+            test_amount = max(int(buy_quote.get("outAmount", 0)) // 10, 1)
+            sell_quote = await self.executor.get_quote(
+                mint, SOL_MINT, test_amount, slippage_bps=SELL_SLIPPAGE_BPS,
+            )
+            if not int(sell_quote.get("outAmount", 0)):
+                logger.info("Skipping %s — Jupiter sell route failed (unsellable)", symbol)
+                return
+        except Exception:
+            logger.info("Skipping %s — could not verify sell route", symbol)
             return
 
         reason = f"Copy trade from {trader.name} ({trader.handle}) — spent {sol_spent:.3f} SOL"

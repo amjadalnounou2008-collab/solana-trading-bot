@@ -15,17 +15,20 @@ class TraderConfig:
     copy_amount_sol: float
 
 
+# Copy best GMGN-vetted traders + autonomous market scanner (both run together)
+ENABLE_COPY_TRADING = True
+COPY_BUY_SOL = 0.03   # per copy trade — small for ~$30 balance
+
 TRADERS: list[TraderConfig] = [
-    # GMGN-vetted — milkybids filters: 60%+ WR, 50%+ 30d PnL, <200 txns
-    TraderConfig("AU73", "@gmgn", "AU73C47eNaF5yhpAgB2CtYqPxREGsXQkSsbqgahEYW6h", 0.05),   # 65.5% WR, 63 txns
-    TraderConfig("flock", "@gmgn", "F1WT79Jkw3BkBDUfCbrKKo15ghZNCEjvnjxQpiCfPuRM", 0.05),  # 60% WR, 11 txns
-    TraderConfig("sarah", "@gmgn", "AAMnoNo3TpezKcT7ah9puLFZ4D59muEhQHJJqpX16ccg", 0.05),  # 66.7% WR, 3 txns
-    TraderConfig("insentos", "@gmgn", "7SDs3PjT2mswKQ7Zo4FTucn9gJdtuW4jaacPA65BseHS", 0.05),
-    TraderConfig("Randall", "@gmgn", "CgEnthZP1pRQqwVtiwmdeLNLyRpngZ1oLDyEUZU5bzGv", 0.05),  # 5 txns
-    # Small sample — lower conviction, same small size
-    TraderConfig("lucacadalo", "@gmgn", "4eoNFTnDaucjCNTgTx8aSz9iLskJ63gvq6p86ithjYD8", 0.05),
-    TraderConfig("Leafswan", "@gmgn", "c6w4EhWt9ca7mqqQHfgvZMU8cKT9w1cfkwdYhQMoRfS", 0.05),
-    TraderConfig("Marcell", "@gmgn", "ATFRUwvyMh61w2Ab6AZxUyxsAfiiuG1RqL6iv3Vi9q2B", 0.05),
+    # Tier 1 — best win rate + selective (milkybids picks)
+    TraderConfig("jijo", "@gmgn", "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk", COPY_BUY_SOL),    # 84.6% WR, 79 txns/mo
+    TraderConfig("Sheep", "@gmgn", "78N177fzNJpp8pG49xDv1efYcTMSzo9tPTKEA9mAVkh2", COPY_BUY_SOL),   # 89.3% WR
+    TraderConfig("nyhrox", "@gmgn", "6S8GezkxYUfZy9JPtYnanbcZTMB87Wjt1qx3c6ELajKC", COPY_BUY_SOL),  # 66% WR, active
+    # Tier 2 — more trades, still passes GMGN filters
+    TraderConfig("AU73", "@gmgn", "AU73C47eNaF5yhpAgB2CtYqPxREGsXQkSsbqgahEYW6h", COPY_BUY_SOL),    # 65.5% WR, 63 txns
+    TraderConfig("flock", "@gmgn", "F1WT79Jkw3BkBDUfCbrKKo15ghZNCEjvnjxQpiCfPuRM", COPY_BUY_SOL),  # 60% WR, 11 txns
+    TraderConfig("insentos", "@gmgn", "7SDs3PjT2mswKQ7Zo4FTucn9gJdtuW4jaacPA65BseHS", COPY_BUY_SOL),  # 66.7% WR
+    TraderConfig("ALJ4P5", "@gmgn", "ALJ4P5QNyHeLEjpKGmA1eUfJHSEGQMjY8HLnDkSgjczb", COPY_BUY_SOL),  # 71% WR, 46 txns
 ]
 
 TRADER_BY_ADDRESS: dict[str, TraderConfig] = {t.address: t for t in TRADERS}
@@ -52,10 +55,13 @@ JUPITER_QUOTE_URL = "https://api.jup.ag/swap/v1/quote"
 JUPITER_SWAP_URL = "https://api.jup.ag/swap/v1/swap"
 JUPITER_PRICE_URL = "https://api.jup.ag/price/v3"
 DEXSCREENER_PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
+DEXSCREENER_BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
+DEXSCREENER_TOP_BOOSTS_URL = "https://api.dexscreener.com/token-boosts/top/v1"
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
 DEXSCREENER_PAIRS_URL = "https://api.dexscreener.com/latest/dex/pairs/solana/{pair}"
 RUGCHECK_URL = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 BIRDEYE_OVERVIEW_URL = "https://public-api.birdeye.so/defi/token_overview"
+BIRDEYE_TRENDING_URL = "https://public-api.birdeye.so/defi/token_trending"
 TWITTER_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent"
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
@@ -67,11 +73,16 @@ COPY_GRADUATED_ONLY = True          # only copy tokens on Raydium/Orca (left pum
 COPY_MIN_GRADUATED_LIQUIDITY_USD = 15_000
 COPY_SKIP_IF_HOLDING = True         # don't buy same token twice
 
-# Scanner settings
-SCAN_INTERVAL_SECONDS  = 8
-SCAN_MIN_SCORE         = 68    # raised — stricter filter
-SCAN_MIN_LIQUIDITY_USD = 30_000  # must have at least $30k liquidity to buy
-SCAN_MIN_AGE_HOURS     = 1.0   # must be at least 1 hour old (less likely to be fresh rug)
+# Scanner settings — autonomous discovery (Axiom Pulse "graduated" style)
+SCAN_INTERVAL_SECONDS  = 12
+SCAN_MIN_SCORE         = 62
+SCAN_MIN_LIQUIDITY_USD = 15_000   # graduated pool minimum
+SCAN_MIN_MCAP_USD      = 25_000   # skip micro-dead coins
+SCAN_MAX_MCAP_USD      = 600_000  # memecoin sweet spot
+SCAN_MIN_AGE_HOURS     = 0.5      # at least 30 min old
+SCAN_GRADUATED_ONLY    = True     # Raydium/Orca/Meteora only — sellable
+SCAN_REQUIRE_SELL_TEST = True     # verify Jupiter sell route BEFORE buying
+SCANNER_BUY_SOL        = 0.03     # small size for ~$30 balance
 
 # Wallet tracker settings
 WALLET_POLL_INTERVAL_SECONDS = 20  # 8 wallets × 1s gap = ~28s per full cycle, stays under free tier
@@ -87,8 +98,9 @@ TP3_SELL_PCT = 25.0       # keeps 25% riding with trailing stop for 100x+
 STOP_LOSS_PCT = -20.0     # tighter stop — cut losses faster
 TRAILING_STOP_PCT = -15.0 # tighter trailing — protect gains after big pump
 TRAILING_ACTIVATION_MULTIPLIER = 3.0
-TIME_STOP_MINUTES = 30    # dump faster if not moving (30 min instead of 45)
-TIME_STOP_MIN_MULTIPLIER = 1.3  # needs at least 1.3x in 30 min or we exit
+TIME_STOP_MINUTES = 15        # flat for 15 min → sell
+TIME_STOP_MIN_MULTIPLIER = 1.1  # needs 1.1x in 15 min or exit
+MAX_HOLD_MINUTES = 45         # never hold longer than 45 min — force sell
 
 # General
 MAX_RETRIES = 3

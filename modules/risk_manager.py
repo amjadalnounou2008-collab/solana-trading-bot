@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from config import (
+    MAX_HOLD_MINUTES,
     RISK_POLL_INTERVAL_SECONDS,
     STOP_LOSS_PCT,
     TIME_STOP_MINUTES,
@@ -351,7 +352,7 @@ class RiskManager:
         if not current_price or current_price <= 0:
             position.price_miss_count += 1
             # Force-sell after 10 consecutive price failures (~50s) — token is dead/illiquid
-            if position.price_miss_count >= 10:
+            if position.price_miss_count >= 6:
                 logger.warning("Force-selling %s — no price data for %d checks",
                                position.symbol, position.price_miss_count)
                 await self._close_position(position, "no_price_data", position.entry_price_usd)
@@ -413,9 +414,15 @@ class RiskManager:
                 await self._close_position(position, "trailing", current_price)
                 return
 
-        # Time stop
+        # Time stop — not moving up
         if hold_minutes >= TIME_STOP_MINUTES and multiplier < TIME_STOP_MIN_MULTIPLIER:
             await self._close_position(position, "time_stop", current_price)
+            return
+
+        # Hard max hold — never sit in a bag forever
+        if hold_minutes >= MAX_HOLD_MINUTES:
+            logger.info("Max hold %d min — force exit %s", MAX_HOLD_MINUTES, position.symbol)
+            await self._close_position(position, "max_hold", current_price)
             return
 
     async def run(self) -> None:
