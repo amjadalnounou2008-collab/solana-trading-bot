@@ -25,7 +25,6 @@ from config import (
     SCAN_MIN_SCORE,
     SCAN_REQUIRE_SELL_TEST,
     SCANNER_BUY_SOL,
-    EXIT_MINT,
     SELL_SLIPPAGE_BPS,
     SOL_MINT,
     TWITTER_BEARER_TOKEN,
@@ -128,11 +127,10 @@ class CoinScanner:
                 return False
             # Test-sell 10% of expected tokens
             test_amount = max(out_amount // 10, 1)
-            quote = await self.executor.get_quote(
-                mint, EXIT_MINT, test_amount, slippage_bps=SELL_SLIPPAGE_BPS,
+            quote, _ = await self.executor._get_exit_quote(
+                mint, test_amount, SELL_SLIPPAGE_BPS,
             )
-            sol_back = int(quote.get("outAmount", 0))
-            return sol_back > 0
+            return bool(quote and int(quote.get("outAmount", 0)) > 0)
         except Exception:
             return False
 

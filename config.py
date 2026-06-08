@@ -45,6 +45,8 @@ PAPER_TRADE: bool = os.getenv("PAPER_TRADE", "true").lower() in ("true", "1", "y
 # Solana constants
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+# Phantom Cash — Phantom's own USD stablecoin (what the app calls "Cash")
+CASH_MINT = "CASHx9KJUStyftLFWGvEVf59SGeG9sh5FfcnZMVPCASH"
 LAMPORTS_PER_SOL = 1_000_000_000
 
 # API endpoints
@@ -110,10 +112,17 @@ SELL_SLIPPAGE_BPS = 1000          # 10% slippage on sells — meme coins move fa
 SELL_SLIPPAGE_RETRY_BPS = [1000, 2500, 5000, 10000]
 SELL_PRIORITY_FEE_LAMPORTS = 300_000
 
-# Exits go to USDC (Phantom "cash") instead of SOL — easier to see balance grow
-SELL_TO_USDC = True
-EXIT_MINT = USDC_MINT if SELL_TO_USDC else SOL_MINT
-EXIT_DECIMALS = 6 if SELL_TO_USDC else 9
-EXIT_LABEL = "USDC" if SELL_TO_USDC else "SOL"
+# Exits go to Phantom Cash (CASH token) — same stablecoin the Phantom app uses
+# Falls back to USDC if Jupiter has no CASH route for a meme coin
+SELL_TO_STABLE = True
+EXIT_MINTS: list[str] = [CASH_MINT, USDC_MINT] if SELL_TO_STABLE else [SOL_MINT]
+EXIT_DECIMALS: dict[str, int] = {CASH_MINT: 6, USDC_MINT: 6, SOL_MINT: 9}
+EXIT_LABELS: dict[str, str] = {
+    CASH_MINT: "Phantom Cash",
+    USDC_MINT: "USDC",
+    SOL_MINT: "SOL",
+}
+EXIT_MINT = EXIT_MINTS[0]
+EXIT_LABEL = EXIT_LABELS[EXIT_MINT]
 MIN_SELL_VALUE_USD = 0.50   # skip dust sells that spam alerts and waste fees
 DUST_BALANCE_USD = 0.25     # treat tiny leftover as sold — stop retry loop

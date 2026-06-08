@@ -16,7 +16,7 @@ from config import (
     DEXSCREENER_TOKEN_URL,
     HELIUS_API_KEY,
     HELIUS_TX_URL,
-    EXIT_MINT,
+    CASH_MINT,
     SELL_SLIPPAGE_BPS,
     SOL_MINT,
     TRADER_BY_ADDRESS,
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("solana-bot.wallet_tracker")
 
-STABLE_MINTS = {SOL_MINT, USDC_MINT}
+STABLE_MINTS = {SOL_MINT, USDC_MINT, CASH_MINT}
 
 
 class WalletTracker:
@@ -215,16 +215,16 @@ class WalletTracker:
             )
             return
 
-        # Verify we can sell before copying — same check as scanner
+        # Verify we can sell to Phantom Cash or USDC before copying
         try:
             buy_quote = await self.executor.get_quote(
                 SOL_MINT, mint, sol_to_lamports(trader.copy_amount_sol),
             )
             test_amount = max(int(buy_quote.get("outAmount", 0)) // 10, 1)
-            sell_quote = await self.executor.get_quote(
-                mint, EXIT_MINT, test_amount, slippage_bps=SELL_SLIPPAGE_BPS,
+            sell_quote, _ = await self.executor._get_exit_quote(
+                mint, test_amount, SELL_SLIPPAGE_BPS,
             )
-            if not int(sell_quote.get("outAmount", 0)):
+            if not sell_quote:
                 logger.info("Skipping %s — Jupiter sell route failed (unsellable)", symbol)
                 return
         except Exception:

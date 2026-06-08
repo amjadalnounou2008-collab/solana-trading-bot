@@ -1,6 +1,6 @@
 """
 One-time cleanup script — reads all token accounts in the wallet
-and swaps everything back to USDC (Phantom cash) via Jupiter.
+and swaps everything to Phantom Cash (CASH) or USDC via Jupiter.
 
 Run with:  python sell_all.py
 """
@@ -21,14 +21,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config import (
+    CASH_MINT,
     DEFAULT_SLIPPAGE_BPS,
     EXIT_DECIMALS,
-    EXIT_LABEL,
-    EXIT_MINT,
+    EXIT_LABELS,
+    EXIT_MINTS,
     HELIUS_RPC_URL,
     JUPITER_QUOTE_URL,
     JUPITER_SWAP_URL,
-    LAMPORTS_PER_SOL,
     SOL_MINT,
     SOLANA_SEND_RPC_URL,
     USDC_MINT,
@@ -74,7 +74,7 @@ async def get_all_token_accounts(session: aiohttp.ClientSession, pubkey: str) ->
                 for acc in accounts:
                     info = acc["account"]["data"]["parsed"]["info"]
                     mint = info["mint"]
-                    if mint in (SOL_MINT, USDC_MINT):
+                    if mint in (SOL_MINT, USDC_MINT, CASH_MINT):
                         continue
                     decimals = int(info["tokenAmount"]["decimals"])
                     raw_amount = int(info["tokenAmount"]["amount"])
@@ -97,21 +97,22 @@ async def get_all_token_accounts(session: aiohttp.ClientSession, pubkey: str) ->
     return []
 
 # ── Get Jupiter quote ─────────────────────────────────────────────────────────
-async def get_quote(session: aiohttp.ClientSession, mint: str, raw_amount: int) -> dict | None:
-    try:
-        async with session.get(JUPITER_QUOTE_URL, params={
-            "inputMint": mint,
-            "outputMint": EXIT_MINT,
-            "amount": str(raw_amount),
-            "slippageBps": str(DEFAULT_SLIPPAGE_BPS),
-        }, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            data = await resp.json(content_type=None)
-            if data.get("error") or not data.get("outAmount"):
-                return None
-            return data
-    except Exception as exc:
-        logger.warning("Quote failed for %s: %s", mint[:8], exc)
-        return None
+async def get_quote(session: aiohttp.ClientSession, mint: str, raw_amount: int) -> tuple[dict | None, str | None]:
+    for exit_mint in EXIT_MINTS:
+        try:
+            async with session.get(JUPITER_QUOTE_URL, params={
+                "inputMint": mint,
+                "outputMint": exit_mint,
+                "amount": str(raw_amount),
+                "slippageBps": str(DEFAULT_SLIPPAGE_BPS),
+            }, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json(content_type=None)
+                if data.get("error") or not data.get("outAmount"):
+                    continue
+                return data, exit_mint
+        except Exception as exc:
+            logger.warning("Quote failed for %s → %s: %s", mint[:8], exit_mint[:8], exc)
+    return None, None
 
 # ── Execute swap ──────────────────────────────────────────────────────────────
 async def execute_swap(session: aiohttp.ClientSession, quote: dict, keypair) -> str | None:
@@ -168,15 +169,18 @@ async def main():
             return
 
         # Get SOL quote for each token to show value
-        logger.info("\n%-20s  %15s  %12s" , "MINT", "AMOUNT", f"{EXIT_LABEL} VALUE")
+        logger.info("\n%-20s  %15s  %12s" , "MINT", "AMOUNT", "CASH VALUE")
         logger.info("-" * 55)
         for i, t in enumerate(tokens):
-            quote = await get_quote(session, t["mint"], t["raw_amount"])
-            if quote:
-                exit_val = int(quote.get("outAmount", 0)) / (10 ** EXIT_DECIMALS)
+            quote, exit_mint = await get_quote(session, t["mint"], t["raw_amount"])
+            if quote and exit_mint:
+                exit_val = int(quote.get("outAmount", 0)) / (10 ** EXIT_DECIMALS[exit_mint])
+                label = EXIT_LABELS.get(exit_mint, "stable")
                 t["quote"] = quote
+                t["exit_mint"] = exit_mint
                 t["exit_value"] = exit_val
-                logger.info("[%d] %-20s  %15.4f  %12.4f %s", i+1, t["mint"][:20], t["amount"], exit_val, EXIT_LABEL)
+                t["exit_label"] = label
+                logger.info("[%d] %-20s  %15.4f  %12.4f %s", i+1, t["mint"][:20], t["amount"], exit_val, label)
             else:
                 t["quote"] = None
                 t["sol_value"] = 0
@@ -212,8 +216,9 @@ async def main():
                 logger.warning("  → No Jupiter route for %s — skipping", mint[:8])
                 continue
 
-            exit_out = int(quote.get("outAmount", 0)) / (10 ** EXIT_DECIMALS)
-            logger.info("  → %.4f %s back", exit_out, EXIT_LABEL)
+            exit_mint = t["exit_mint"]
+            exit_out = int(quote.get("outAmount", 0)) / (10 ** EXIT_DECIMALS[exit_mint])
+            logger.info("  → %.4f %s back", exit_out, t.get("exit_label", "cash"))
 
             tx_sig = await execute_swap(session, quote, keypair)
             if tx_sig:

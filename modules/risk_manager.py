@@ -12,7 +12,7 @@ from config import (
     DUST_BALANCE_USD,
     MAX_HOLD_MINUTES,
     RISK_POLL_INTERVAL_SECONDS,
-    SELL_TO_USDC,
+    SELL_TO_STABLE,
     STOP_LOSS_PCT,
     TIME_STOP_MINUTES,
     TIME_STOP_MIN_MULTIPLIER,
@@ -303,7 +303,7 @@ class RiskManager:
                 "time": datetime.now(timezone.utc),
             })
             await self._persist(position)
-            unit = "USDC" if SELL_TO_USDC else "SOL"
+            unit = sell_result.exit_label or ("stable" if SELL_TO_STABLE else "SOL")
             logger.info("Partial sell — %s | %s | %.2f%% | %.4f %s",
                         position.symbol, exit_reason, sell_pct, sell_result.sol_received, unit)
             return True
@@ -333,7 +333,7 @@ class RiskManager:
         exit_time = datetime.now(timezone.utc)
         sol_price = await self.executor.get_sol_price_usd()
         entry_usd = position.initial_sol * sol_price
-        if SELL_TO_USDC:
+        if SELL_TO_STABLE:
             pnl_usd = position.total_sol_received - entry_usd
             pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0.0
         else:
