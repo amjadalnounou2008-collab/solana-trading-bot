@@ -63,8 +63,10 @@ COPY_MAX_TRADER_SOL = 20.0
 COPY_MAX_MARKET_CAP_USD = 800_000
 
 # Scanner settings
-SCAN_INTERVAL_SECONDS = 8
-SCAN_MIN_SCORE = 62
+SCAN_INTERVAL_SECONDS  = 8
+SCAN_MIN_SCORE         = 68    # raised — stricter filter
+SCAN_MIN_LIQUIDITY_USD = 30_000  # must have at least $30k liquidity to buy
+SCAN_MIN_AGE_HOURS     = 1.0   # must be at least 1 hour old (less likely to be fresh rug)
 
 # Wallet tracker settings
 WALLET_POLL_INTERVAL_SECONDS = 5

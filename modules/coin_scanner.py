@@ -14,6 +14,8 @@ from config import (
     DEXSCREENER_TOKEN_URL,
     RUGCHECK_URL,
     SCAN_INTERVAL_SECONDS,
+    SCAN_MIN_LIQUIDITY_USD,
+    SCAN_MIN_AGE_HOURS,
     SCAN_MIN_SCORE,
     TWITTER_BEARER_TOKEN,
     TWITTER_SEARCH_URL,
@@ -29,7 +31,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("solana-bot.coin_scanner")
 
-DEFAULT_BUY_SOL = 0.1
+DEFAULT_BUY_SOL = 0.05  # reduced — smaller risk per trade
 
 
 class CoinScanner:
@@ -59,6 +61,11 @@ class CoinScanner:
         return max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
 
     async def _rugcheck_score(self, mint: str) -> tuple[bool, float]:
+        """
+        RugCheck score: 0 = safe, higher = MORE RISKY.
+        We reject anything above 500 (medium-high risk).
+        Returns (is_safe, risk_score).
+        """
         try:
             url = RUGCHECK_URL.format(mint=mint)
             data = await fetch_json(self.session, "GET", url, label=f"RugCheck {mint[:8]}")
@@ -70,7 +77,9 @@ class CoinScanner:
                 for r in risks
             )
             rugged = data.get("rugged", False)
-            return not (is_honeypot or rugged), score
+            # Reject if score too high (risky) or flagged
+            too_risky = score > 500
+            return not (is_honeypot or rugged or too_risky), score
         except Exception:
             return True, 50.0
 
@@ -205,8 +214,17 @@ class CoinScanner:
         else:
             twitter_score = 0
 
-        # RugCheck bonus/penalty (0-10)
-        safety_score = clamp(rugcheck_score / 10, 0, 10) if rugcheck_ok else 0
+        # RugCheck safety score (0-10) — lower risk score = safer = more points
+        if not rugcheck_ok:
+            safety_score = 0
+        elif rugcheck_score <= 100:
+            safety_score = 10   # very safe
+        elif rugcheck_score <= 200:
+            safety_score = 7
+        elif rugcheck_score <= 350:
+            safety_score = 4
+        else:
+            safety_score = 1   # borderline — passes 500 filter but still risky
 
         # Birdeye buy/sell ratio bonus (0-5)
         buy_24h = float(birdeye.get("buy24h", 0) or 0)
@@ -252,9 +270,28 @@ class CoinScanner:
             return
 
         symbol = pair.get("baseToken", {}).get("symbol", "UNKNOWN")
+
+        # Hard filters — skip before spending API calls
+        liquidity_usd = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        if liquidity_usd < SCAN_MIN_LIQUIDITY_USD:
+            logger.info("Scanner skip %s — liquidity $%.0f < $%.0f minimum",
+                        symbol, liquidity_usd, SCAN_MIN_LIQUIDITY_USD)
+            self._seen_mints.add(mint)
+            return
+
+        pair_created = pair.get("pairCreatedAt")
+        if pair_created:
+            age_hours = (datetime.now(timezone.utc) - datetime.fromtimestamp(
+                pair_created / 1000, tz=timezone.utc)).total_seconds() / 3600
+            if age_hours < SCAN_MIN_AGE_HOURS:
+                logger.info("Scanner skip %s — only %.1fh old (min %.1fh)",
+                            symbol, age_hours, SCAN_MIN_AGE_HOURS)
+                self._seen_mints.add(mint)
+                return
+
         rugcheck_ok, rugcheck_score = await self._rugcheck_score(mint)
         if not rugcheck_ok:
-            logger.info("Scanner skip %s — RugCheck flagged honeypot/rug", symbol)
+            logger.info("Scanner skip %s — RugCheck flagged (score %.0f)", symbol, rugcheck_score)
             self._seen_mints.add(mint)
             return
 
