@@ -41,39 +41,50 @@ def load_keypair():
     except Exception:
         return Keypair.from_bytes(bytes(json.loads(WALLET_PRIVATE_KEY)))
 
+TOKEN_PROGRAMS = [
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",  # Token-2022 (pump.fun)
+]
+
 # ── Fetch all token accounts ──────────────────────────────────────────────────
 async def get_all_token_accounts(session: aiohttp.ClientSession, pubkey: str) -> list[dict]:
-    # Try public RPC first, then Helius as fallback
+    tokens: list[dict] = []
+    seen_mints: set[str] = set()
+
     for rpc_url in [SOLANA_SEND_RPC_URL, HELIUS_RPC_URL]:
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [pubkey, {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
-                       {"encoding": "jsonParsed"}],
-        }
-        try:
-            async with session.post(rpc_url, json=payload,
-                                    timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                data = await resp.json()
-            if data.get("error"):
-                logger.warning("RPC error from %s: %s", rpc_url[:40], data["error"])
-                continue
-            accounts = data.get("result", {}).get("value", [])
-            logger.info("RPC %s returned %d token account(s)", rpc_url[:40], len(accounts))
-            tokens = []
-            for acc in accounts:
-                info = acc["account"]["data"]["parsed"]["info"]
-                mint = info["mint"]
-                amount = float(info["tokenAmount"]["uiAmount"] or 0)
-                decimals = int(info["tokenAmount"]["decimals"])
-                raw_amount = int(info["tokenAmount"]["amount"])
-                if amount > 0 and mint != SOL_MINT:
+        for program_id in TOKEN_PROGRAMS:
+            payload = {
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [pubkey, {"programId": program_id}, {"encoding": "jsonParsed"}],
+            }
+            try:
+                async with session.post(rpc_url, json=payload,
+                                        timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    data = await resp.json()
+                if data.get("error"):
+                    logger.warning("RPC error: %s", data["error"].get("message", data["error"]))
+                    continue
+                accounts = data.get("result", {}).get("value", [])
+                logger.info("Found %d account(s) via %s", len(accounts), program_id[:8])
+                for acc in accounts:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    mint = info["mint"]
+                    if mint == SOL_MINT or mint in seen_mints:
+                        continue
+                    decimals = int(info["tokenAmount"]["decimals"])
+                    raw_amount = int(info["tokenAmount"]["amount"])
+                    if raw_amount <= 0:
+                        continue
+                    ui = info["tokenAmount"]["uiAmount"]
+                    amount = float(ui) if ui is not None else raw_amount / (10**decimals)
+                    seen_mints.add(mint)
                     tokens.append({"mint": mint, "amount": amount,
                                    "decimals": decimals, "raw_amount": raw_amount})
-            if tokens:
-                return tokens
-        except Exception as exc:
-            logger.warning("RPC call failed (%s): %s", rpc_url[:40], exc)
+            except Exception as exc:
+                logger.warning("RPC call failed: %s", exc)
+        if tokens:
+            return tokens
     return []
 
 # ── Get Jupiter quote ─────────────────────────────────────────────────────────

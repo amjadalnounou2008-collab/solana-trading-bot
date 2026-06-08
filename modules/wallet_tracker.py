@@ -7,9 +7,13 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 
 from config import (
+    COPY_GRADUATED_ONLY,
     COPY_MAX_MARKET_CAP_USD,
     COPY_MAX_TRADER_SOL,
+    COPY_MIN_GRADUATED_LIQUIDITY_USD,
     COPY_MIN_TRADER_SOL,
+    COPY_SKIP_IF_HOLDING,
+    DEXSCREENER_TOKEN_URL,
     HELIUS_API_KEY,
     HELIUS_TX_URL,
     SOL_MINT,
@@ -117,19 +121,38 @@ class WalletTracker:
         mint, _, symbol = max(received_tokens, key=lambda x: x[1])
         return mint, symbol
 
-    async def _get_market_cap(self, mint: str) -> float | None:
-        from config import DEXSCREENER_TOKEN_URL
-
+    async def _get_best_pair(self, mint: str) -> dict | None:
         try:
             url = DEXSCREENER_TOKEN_URL.format(mint=mint)
-            data = await fetch_json(self.session, "GET", url, label=f"Market cap {mint[:8]}")
+            data = await fetch_json(self.session, "GET", url, label=f"DexScreener {mint[:8]}")
             pairs = data.get("pairs") or []
             if not pairs:
                 return None
-            best = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
-            return float(best.get("marketCap") or best.get("fdv") or 0)
+            return max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
         except Exception:
             return None
+
+    async def _get_market_cap(self, mint: str) -> float | None:
+        pair = await self._get_best_pair(mint)
+        if not pair:
+            return None
+        return float(pair.get("marketCap") or pair.get("fdv") or 0)
+
+    async def _is_graduated(self, mint: str) -> bool:
+        """Token has graduated from pump.fun — trading on a real DEX with liquidity."""
+        pair = await self._get_best_pair(mint)
+        if not pair:
+            return False
+        dex = (pair.get("dexId") or "").lower()
+        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        graduated_dexes = {"raydium", "orca", "meteora", "pumpswap"}
+        return dex in graduated_dexes and liq >= COPY_MIN_GRADUATED_LIQUIDITY_USD
+
+    def _already_holding(self, mint: str) -> bool:
+        rm = self.executor.risk_manager
+        if not rm:
+            return False
+        return any(not p.closed and p.mint == mint for p in rm.positions.values())
 
     async def _process_transaction(self, trader_address: str, tx: dict[str, Any]) -> None:
         signature = tx.get("signature", "")
@@ -168,6 +191,18 @@ class WalletTracker:
         if sol_spent > COPY_MAX_TRADER_SOL:
             logger.info("Skipping — trader spent %.4f SOL (> %.0f max)", sol_spent, COPY_MAX_TRADER_SOL)
             return
+
+        if COPY_SKIP_IF_HOLDING and self._already_holding(mint):
+            logger.info("Skipping %s — already holding this token", symbol)
+            return
+
+        if COPY_GRADUATED_ONLY:
+            if not await self._is_graduated(mint):
+                logger.info(
+                    "Skipping %s — not graduated (needs Raydium/Orca pool with $%dk+ liq)",
+                    symbol, COPY_MIN_GRADUATED_LIQUIDITY_USD // 1000,
+                )
+                return
 
         market_cap = await self._get_market_cap(mint)
         if market_cap and market_cap > COPY_MAX_MARKET_CAP_USD:

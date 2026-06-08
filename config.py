@@ -56,10 +56,13 @@ BIRDEYE_OVERVIEW_URL = "https://public-api.birdeye.so/defi/token_overview"
 TWITTER_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent"
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
-# Copy-trade filters
+# Copy-trade filters (milkybids-style: graduated tokens from vetted wallets)
 COPY_MIN_TRADER_SOL = 0.3
 COPY_MAX_TRADER_SOL = 20.0
 COPY_MAX_MARKET_CAP_USD = 800_000
+COPY_GRADUATED_ONLY = True          # only copy tokens on Raydium/Orca (left pump.fun curve)
+COPY_MIN_GRADUATED_LIQUIDITY_USD = 15_000
+COPY_SKIP_IF_HOLDING = True         # don't buy same token twice
 
 # Scanner settings
 SCAN_INTERVAL_SECONDS  = 8
