@@ -109,3 +109,11 @@ DEFAULT_SLIPPAGE_BPS = 300
 SELL_SLIPPAGE_BPS = 1000          # 10% slippage on sells — meme coins move fast
 SELL_SLIPPAGE_RETRY_BPS = [1000, 2500, 5000, 10000]
 SELL_PRIORITY_FEE_LAMPORTS = 300_000
+
+# Exits go to USDC (Phantom "cash") instead of SOL — easier to see balance grow
+SELL_TO_USDC = True
+EXIT_MINT = USDC_MINT if SELL_TO_USDC else SOL_MINT
+EXIT_DECIMALS = 6 if SELL_TO_USDC else 9
+EXIT_LABEL = "USDC" if SELL_TO_USDC else "SOL"
+MIN_SELL_VALUE_USD = 0.50   # skip dust sells that spam alerts and waste fees
+DUST_BALANCE_USD = 0.25     # treat tiny leftover as sold — stop retry loop

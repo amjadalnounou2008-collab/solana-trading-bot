@@ -9,8 +9,10 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from config import (
+    DUST_BALANCE_USD,
     MAX_HOLD_MINUTES,
     RISK_POLL_INTERVAL_SECONDS,
+    SELL_TO_USDC,
     STOP_LOSS_PCT,
     TIME_STOP_MINUTES,
     TIME_STOP_MIN_MULTIPLIER,
@@ -282,8 +284,18 @@ class RiskManager:
         )
         if sell_result.success:
             position.sell_fail_count = 0
-            await self._sync_wallet_balance(position)
-            position.total_sol_received += sell_result.sol_received
+            if sell_result.is_dust:
+                position.remaining_tokens = 0
+            else:
+                await self._sync_wallet_balance(position)
+                if position.remaining_tokens > 0:
+                    raw = int(position.remaining_tokens * (10 ** position.decimals))
+                    rem_usd = await self.executor.get_sell_quote_usd(position.mint, raw)
+                    if rem_usd is not None and rem_usd < DUST_BALANCE_USD:
+                        logger.info("Dust cleared — %s ($%.2f left, stopping retries)",
+                                      position.symbol, rem_usd)
+                        position.remaining_tokens = 0
+                position.total_sol_received += sell_result.sol_received
             position.partial_exits.append({
                 "reason": exit_reason,
                 "tokens": tokens_to_sell,
@@ -291,8 +303,9 @@ class RiskManager:
                 "time": datetime.now(timezone.utc),
             })
             await self._persist(position)
-            logger.info("Partial sell — %s | %s | %.2f%% | %.4f SOL",
-                        position.symbol, exit_reason, sell_pct, sell_result.sol_received)
+            unit = "USDC" if SELL_TO_USDC else "SOL"
+            logger.info("Partial sell — %s | %s | %.2f%% | %.4f %s",
+                        position.symbol, exit_reason, sell_pct, sell_result.sol_received, unit)
             return True
 
         position.sell_fail_count += 1
@@ -318,9 +331,14 @@ class RiskManager:
         await self._persist(position)
 
         exit_time = datetime.now(timezone.utc)
-        pnl_sol   = position.total_sol_received - position.initial_sol
         sol_price = await self.executor.get_sol_price_usd()
-        pnl_usd   = pnl_sol * sol_price
+        entry_usd = position.initial_sol * sol_price
+        if SELL_TO_USDC:
+            pnl_usd = position.total_sol_received - entry_usd
+            pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0.0
+        else:
+            pnl_sol = position.total_sol_received - position.initial_sol
+            pnl_usd = pnl_sol * sol_price
 
         alert = TradeAlert(
             token_mint=position.mint,

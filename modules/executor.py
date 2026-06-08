@@ -15,15 +15,21 @@ from solders.transaction import VersionedTransaction
 import config
 from config import (
     DEFAULT_SLIPPAGE_BPS,
+    DUST_BALANCE_USD,
+    EXIT_DECIMALS,
+    EXIT_LABEL,
+    EXIT_MINT,
     HELIUS_RPC_URL,
     JUPITER_PRICE_URL,
     JUPITER_QUOTE_URL,
     JUPITER_SWAP_URL,
     LAMPORTS_PER_SOL,
+    MIN_SELL_VALUE_USD,
     PAPER_TRADE,
     SELL_PRIORITY_FEE_LAMPORTS,
     SELL_SLIPPAGE_BPS,
     SELL_SLIPPAGE_RETRY_BPS,
+    SELL_TO_USDC,
     SOL_MINT,
     SOLANA_SEND_RPC_URL,
     WALLET_PRIVATE_KEY,
@@ -57,10 +63,11 @@ class SellResult:
     mint: str
     symbol: str
     amount_tokens: float
-    sol_received: float
+    sol_received: float       # USDC amount when SELL_TO_USDC, else SOL
     exit_price_usd: float
     tx_signature: str | None
     sell_pct: float
+    is_dust: bool = False
 
 
 class Executor:
@@ -98,6 +105,17 @@ class Executor:
         if self.keypair:
             return str(self.keypair.pubkey())
         return "PAPER_WALLET"
+
+    def _parse_exit_amount(self, out_raw: int) -> float:
+        if SELL_TO_USDC:
+            return out_raw / (10 ** EXIT_DECIMALS)
+        return lamports_to_sol(out_raw)
+
+    async def _exit_value_usd(self, out_raw: int) -> float:
+        amount = self._parse_exit_amount(out_raw)
+        if SELL_TO_USDC:
+            return amount
+        return amount * await self.get_sol_price_usd()
 
     async def get_sol_price_usd(self) -> float:
         import time
@@ -378,38 +396,57 @@ class Executor:
             symbol, sell_pct, amount_tokens, raw_amount,
         )
 
+        # Pre-check value — skip dust that spams alerts and never moves the needle
+        try:
+            preview = await self.get_quote(mint, EXIT_MINT, raw_amount, slippage_bps=SELL_SLIPPAGE_BPS)
+            preview_usd = await self._exit_value_usd(int(preview.get("outAmount", 0)))
+            if preview_usd < MIN_SELL_VALUE_USD:
+                logger.info(
+                    "SELL skip %s — only $%.2f %s (dust, treating as done)",
+                    symbol, preview_usd, EXIT_LABEL,
+                )
+                return SellResult(
+                    success=True, mint=mint, symbol=symbol, amount_tokens=amount_tokens,
+                    sol_received=0, exit_price_usd=0, tx_signature=None,
+                    sell_pct=sell_pct, is_dust=True,
+                )
+        except Exception:
+            pass
+
         last_exc: Exception | None = None
         for slippage in SELL_SLIPPAGE_RETRY_BPS:
             try:
-                quote = await self.get_quote(mint, SOL_MINT, raw_amount, slippage_bps=slippage)
-                out_lamports = int(quote.get("outAmount", 0))
-                if out_lamports <= 0:
+                quote = await self.get_quote(mint, EXIT_MINT, raw_amount, slippage_bps=slippage)
+                out_raw = int(quote.get("outAmount", 0))
+                if out_raw <= 0:
                     continue
-                sol_received = lamports_to_sol(out_lamports)
+                received = self._parse_exit_amount(out_raw)
+                received_usd = await self._exit_value_usd(out_raw)
                 exit_price_usd = await self.get_token_price_usd(mint) or 0.0
 
                 logger.info(
-                    "SELL attempt %s — slippage %d bps, expect %.4f SOL back",
-                    symbol, slippage, sol_received,
+                    "SELL attempt %s — slippage %d bps, expect $%.2f %s",
+                    symbol, slippage, received_usd, EXIT_LABEL,
                 )
                 tx_sig = await self.execute_swap(quote)
 
                 logger.info(
-                    "SELL complete — %s sold %.4f tokens for %.4f SOL (tx: %s)",
-                    symbol, amount_tokens, sol_received, tx_sig,
+                    "SELL complete — %s sold %.4f tokens for %.4f %s (tx: %s)",
+                    symbol, amount_tokens, received, EXIT_LABEL, tx_sig,
                 )
-                if self.risk_manager:
+                # One alert per meaningful sell — only full exits (100%), not every partial/dust
+                if self.risk_manager and sell_pct >= 99.0 and received_usd >= MIN_SELL_VALUE_USD:
                     try:
                         await self.risk_manager.alerter.send_message(
                             f"✅ <b>SOLD — {symbol}</b>\n"
-                            f"Got back: {sol_received:.4f} SOL\n"
+                            f"Got back: <b>${received_usd:.2f} {EXIT_LABEL}</b> (Phantom cash)\n"
                             f"Tx: <code>{tx_sig[:16]}...</code>"
                         )
                     except Exception:
                         pass
                 return SellResult(
                     success=True, mint=mint, symbol=symbol, amount_tokens=amount_tokens,
-                    sol_received=sol_received, exit_price_usd=exit_price_usd,
+                    sol_received=received, exit_price_usd=exit_price_usd,
                     tx_signature=tx_sig, sell_pct=sell_pct,
                 )
             except Exception as exc:
@@ -472,11 +509,19 @@ class Executor:
                 continue
         return 0.0, 6
 
-    async def get_sell_quote_sol(self, mint: str, raw_amount: int) -> float | None:
-        """How much SOL Jupiter would pay right now — used for real PnL checks."""
+    async def get_sell_quote_usd(self, mint: str, raw_amount: int) -> float | None:
+        """How much USD Jupiter would pay right now (USDC or SOL×price)."""
         try:
-            quote = await self.get_quote(mint, SOL_MINT, raw_amount, slippage_bps=SELL_SLIPPAGE_BPS)
+            quote = await self.get_quote(mint, EXIT_MINT, raw_amount, slippage_bps=SELL_SLIPPAGE_BPS)
             out = int(quote.get("outAmount", 0))
-            return lamports_to_sol(out) if out > 0 else None
+            return await self._exit_value_usd(out) if out > 0 else None
         except Exception:
             return None
+
+    async def get_sell_quote_sol(self, mint: str, raw_amount: int) -> float | None:
+        """SOL-equivalent exit value — for multiplier checks."""
+        usd = await self.get_sell_quote_usd(mint, raw_amount)
+        if usd is None:
+            return None
+        sol_price = await self.get_sol_price_usd()
+        return usd / sol_price if sol_price > 0 else None

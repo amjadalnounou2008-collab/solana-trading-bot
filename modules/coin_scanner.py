@@ -10,13 +10,24 @@ import aiohttp
 from config import (
     BIRDEYE_API_KEY,
     BIRDEYE_OVERVIEW_URL,
+    BIRDEYE_TRENDING_URL,
+    DEXSCREENER_BOOSTS_URL,
     DEXSCREENER_PROFILES_URL,
     DEXSCREENER_TOKEN_URL,
+    DEXSCREENER_TOP_BOOSTS_URL,
     RUGCHECK_URL,
+    SCAN_GRADUATED_ONLY,
     SCAN_INTERVAL_SECONDS,
-    SCAN_MIN_LIQUIDITY_USD,
+    SCAN_MAX_MCAP_USD,
     SCAN_MIN_AGE_HOURS,
+    SCAN_MIN_LIQUIDITY_USD,
+    SCAN_MIN_MCAP_USD,
     SCAN_MIN_SCORE,
+    SCAN_REQUIRE_SELL_TEST,
+    SCANNER_BUY_SOL,
+    EXIT_MINT,
+    SELL_SLIPPAGE_BPS,
+    SOL_MINT,
     TWITTER_BEARER_TOKEN,
     TWITTER_SEARCH_URL,
 )
@@ -48,7 +59,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("solana-bot.coin_scanner")
 
-DEFAULT_BUY_SOL = 0.05  # reduced — smaller risk per trade
+GRADUATED_DEXES = {"raydium", "orca", "meteora", "pumpswap"}
 
 
 class CoinScanner:
@@ -58,16 +69,72 @@ class CoinScanner:
         self._seen_mints: set[str] = set()
         self._running = False
 
-    async def _fetch_latest_profiles(self) -> list[dict[str, Any]]:
+    async def _fetch_latest_profiles(self) -> list[str]:
         data = await fetch_json(
-            self.session,
-            "GET",
-            DEXSCREENER_PROFILES_URL,
-            label="DexScreener profiles",
+            self.session, "GET", DEXSCREENER_PROFILES_URL, label="DexScreener profiles",
         )
         if not isinstance(data, list):
             return []
-        return [p for p in data if p.get("chainId") == "solana"]
+        return [
+            p["tokenAddress"] for p in data
+            if p.get("chainId") == "solana" and p.get("tokenAddress")
+        ]
+
+    async def _fetch_dexscreener_boosts(self) -> list[str]:
+        mints: list[str] = []
+        for url, label in [
+            (DEXSCREENER_BOOSTS_URL, "DexScreener boosts"),
+            (DEXSCREENER_TOP_BOOSTS_URL, "DexScreener top boosts"),
+        ]:
+            try:
+                data = await fetch_json(self.session, "GET", url, label=label)
+                if not isinstance(data, list):
+                    continue
+                for item in data:
+                    if item.get("chainId") == "solana" and item.get("tokenAddress"):
+                        mints.append(item["tokenAddress"])
+            except Exception as exc:
+                logger.warning("%s failed: %s", label, exc)
+        return mints
+
+    async def _fetch_birdeye_trending(self) -> list[str]:
+        if not BIRDEYE_API_KEY or BIRDEYE_API_KEY.startswith("your_"):
+            return []
+        try:
+            headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
+            data = await fetch_json(
+                self.session, "GET", BIRDEYE_TRENDING_URL,
+                params={"sort_by": "rank", "sort_type": "asc", "offset": "0", "limit": "20"},
+                headers=headers, label="Birdeye trending",
+            )
+            tokens = data.get("data", {}).get("tokens", []) or data.get("data", []) or []
+            return [t.get("address", "") for t in tokens if t.get("address")]
+        except Exception as exc:
+            logger.warning("Birdeye trending failed: %s", exc)
+            return []
+
+    def _is_graduated(self, pair: dict[str, Any]) -> bool:
+        dex = (pair.get("dexId") or "").lower()
+        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        return dex in GRADUATED_DEXES and liq >= SCAN_MIN_LIQUIDITY_USD
+
+    async def _verify_sell_route(self, mint: str, buy_quote: dict[str, Any]) -> bool:
+        """Confirm Jupiter can sell this token — prevents honeypot/no-route bags."""
+        if not SCAN_REQUIRE_SELL_TEST:
+            return True
+        try:
+            out_amount = int(buy_quote.get("outAmount", 0))
+            if out_amount <= 0:
+                return False
+            # Test-sell 10% of expected tokens
+            test_amount = max(out_amount // 10, 1)
+            quote = await self.executor.get_quote(
+                mint, EXIT_MINT, test_amount, slippage_bps=SELL_SLIPPAGE_BPS,
+            )
+            sol_back = int(quote.get("outAmount", 0))
+            return sol_back > 0
+        except Exception:
+            return False
 
     async def _fetch_pair_data(self, mint: str) -> dict[str, Any] | None:
         url = DEXSCREENER_TOKEN_URL.format(mint=mint)
@@ -287,16 +354,37 @@ class CoinScanner:
             return
 
         symbol = pair.get("baseToken", {}).get("symbol", "UNKNOWN")
-
-        # Hard filters — skip before spending API calls
         liquidity_usd = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        market_cap = float(pair.get("marketCap") or pair.get("fdv") or 0)
+        volume_24h = float(pair.get("volume", {}).get("h24", 0) or 0)
+        dex = pair.get("dexId", "?")
+
         if liquidity_usd < SCAN_MIN_LIQUIDITY_USD:
-            logger.info("Scanner skip %s — liquidity $%.0f < $%.0f minimum",
+            logger.info("Scanner skip %s — liquidity $%.0f < $%.0f",
                         symbol, liquidity_usd, SCAN_MIN_LIQUIDITY_USD)
             self._seen_mints.add(mint)
             return
 
+        if market_cap < SCAN_MIN_MCAP_USD:
+            logger.info("Scanner skip %s — mcap $%.0f < $%.0f",
+                        symbol, market_cap, SCAN_MIN_MCAP_USD)
+            self._seen_mints.add(mint)
+            return
+
+        if market_cap > SCAN_MAX_MCAP_USD:
+            logger.info("Scanner skip %s — mcap $%.0f > $%.0f (too big)",
+                        symbol, market_cap, SCAN_MAX_MCAP_USD)
+            self._seen_mints.add(mint)
+            return
+
+        if SCAN_GRADUATED_ONLY and not self._is_graduated(pair):
+            logger.info("Scanner skip %s — not graduated (dex=%s, need Raydium/Orca)",
+                        symbol, dex)
+            self._seen_mints.add(mint)
+            return
+
         pair_created = pair.get("pairCreatedAt")
+        age_hours = 999.0
         if pair_created:
             age_hours = (datetime.now(timezone.utc) - datetime.fromtimestamp(
                 pair_created / 1000, tz=timezone.utc)).total_seconds() / 3600
@@ -317,31 +405,36 @@ class CoinScanner:
         score, breakdown = self._score_token(pair, rugcheck_ok, rugcheck_score, birdeye, twitter_mentions)
 
         logger.info(
-            "Scanned %s (%s) — score %.0f/100 | liq $%s | mcap $%s",
-            symbol,
-            mint[:8],
-            score,
-            f"{float(pair.get('liquidity', {}).get('usd', 0) or 0):,.0f}",
-            f"{float(pair.get('marketCap') or pair.get('fdv') or 0):,.0f}",
+            "Scanned %s (%s) | score %.0f | mcap $%s | liq $%s | vol $%s | dex %s | age %.1fh",
+            symbol, mint[:8], score,
+            f"{market_cap:,.0f}", f"{liquidity_usd:,.0f}",
+            f"{volume_24h:,.0f}", dex, age_hours,
         )
 
         self._seen_mints.add(mint)
 
         if score >= SCAN_MIN_SCORE:
-            # Verify Jupiter can actually price this token before buying
-            jupiter_price = await self.executor.get_token_price_usd(mint)
-            if not jupiter_price or jupiter_price <= 0:
+            from config import LAMPORTS_PER_SOL
+            from modules.utils import sol_to_lamports
+
+            buy_quote = await self.executor.get_quote(
+                SOL_MINT, mint, sol_to_lamports(SCANNER_BUY_SOL),
+            )
+            if not await self._verify_sell_route(mint, buy_quote):
                 logger.info(
-                    "Scanner skip %s (score %.0f) — Jupiter has no price, token not tradeable yet",
+                    "Scanner skip %s (score %.0f) — cannot sell on Jupiter (honeypot/no route)",
                     symbol, score,
                 )
                 return
 
-            reason = f"Autonomous discovery — score {score:.0f}/100 (threshold {SCAN_MIN_SCORE})"
-            logger.info("BUY signal from scanner — %s scored %.0f", symbol, score)
+            reason = (
+                f"Scanner discovery — score {score:.0f}/100 | "
+                f"mcap ${market_cap:,.0f} | liq ${liquidity_usd:,.0f} | {dex}"
+            )
+            logger.info("BUY signal — %s scored %.0f (sell route verified)", symbol, score)
             await self.executor.buy_token(
                 mint=mint,
-                amount_sol=DEFAULT_BUY_SOL,
+                amount_sol=SCANNER_BUY_SOL,
                 reason=reason,
                 symbol=symbol,
                 score_breakdown=breakdown,
@@ -438,29 +531,35 @@ class CoinScanner:
             logger.error("Error evaluating GMGN token %s: %s", mint[:8], exc)
 
     async def _scan_cycle(self) -> None:
-        # ── DexScreener scan ──────────────────────────────────────────────────
+        candidates: list[str] = []
+
         profiles = await self._fetch_latest_profiles()
-        solana_tokens = [
-            p.get("tokenAddress", "") for p in profiles
-            if p.get("tokenAddress") and p.get("tokenAddress") not in self._seen_mints
-        ]
-        if solana_tokens:
-            logger.info("Scanner found %d new Solana token(s) to evaluate", len(solana_tokens))
-        for mint in solana_tokens[:15]:
+        boosts = await self._fetch_dexscreener_boosts()
+        birdeye = await self._fetch_birdeye_trending()
+
+        for source_mints in (profiles, boosts, birdeye):
+            for mint in source_mints:
+                if mint and mint not in self._seen_mints and mint not in candidates:
+                    candidates.append(mint)
+
+        if candidates:
+            logger.info(
+                "Scanner cycle — %d candidates (profiles=%d boosts=%d birdeye=%d)",
+                len(candidates), len(profiles), len(boosts), len(birdeye),
+            )
+
+        for mint in candidates[:20]:
             try:
                 await self._evaluate_token(mint)
             except Exception as exc:
                 logger.error("Error evaluating %s: %s", mint[:8], exc)
 
-        # GMGN disabled — Railway datacenter IPs are blocked by GMGN (403)
-        # DexScreener scanning handles discovery instead
-
     async def run(self) -> None:
         self._running = True
         logger.info(
-            "Coin scanner started — DexScreener + GMGN every %ds (min score %d)",
-            SCAN_INTERVAL_SECONDS,
-            SCAN_MIN_SCORE,
+            "Market scanner started — DexScreener + Birdeye every %ds | "
+            "graduated only | min score %d | buy %.3f SOL",
+            SCAN_INTERVAL_SECONDS, SCAN_MIN_SCORE, SCANNER_BUY_SOL,
         )
 
         while self._running:

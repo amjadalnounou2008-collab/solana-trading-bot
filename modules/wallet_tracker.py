@@ -16,6 +16,7 @@ from config import (
     DEXSCREENER_TOKEN_URL,
     HELIUS_API_KEY,
     HELIUS_TX_URL,
+    EXIT_MINT,
     SELL_SLIPPAGE_BPS,
     SOL_MINT,
     TRADER_BY_ADDRESS,
@@ -221,7 +222,7 @@ class WalletTracker:
             )
             test_amount = max(int(buy_quote.get("outAmount", 0)) // 10, 1)
             sell_quote = await self.executor.get_quote(
-                mint, SOL_MINT, test_amount, slippage_bps=SELL_SLIPPAGE_BPS,
+                mint, EXIT_MINT, test_amount, slippage_bps=SELL_SLIPPAGE_BPS,
             )
             if not int(sell_quote.get("outAmount", 0)):
                 logger.info("Skipping %s — Jupiter sell route failed (unsellable)", symbol)

@@ -1,6 +1,6 @@
 """
 One-time cleanup script — reads all token accounts in the wallet
-and swaps everything back to SOL via Jupiter.
+and swaps everything back to USDC (Phantom cash) via Jupiter.
 
 Run with:  python sell_all.py
 """
@@ -21,14 +21,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config import (
+    DEFAULT_SLIPPAGE_BPS,
+    EXIT_DECIMALS,
+    EXIT_LABEL,
+    EXIT_MINT,
     HELIUS_RPC_URL,
     JUPITER_QUOTE_URL,
     JUPITER_SWAP_URL,
     LAMPORTS_PER_SOL,
     SOL_MINT,
     SOLANA_SEND_RPC_URL,
+    USDC_MINT,
     WALLET_PRIVATE_KEY,
-    DEFAULT_SLIPPAGE_BPS,
 )
 
 # ── Load keypair ──────────────────────────────────────────────────────────────
@@ -48,8 +52,8 @@ TOKEN_PROGRAMS = [
 
 # ── Fetch all token accounts ──────────────────────────────────────────────────
 async def get_all_token_accounts(session: aiohttp.ClientSession, pubkey: str) -> list[dict]:
-    tokens: list[dict] = []
-    seen_mints: set[str] = set()
+    """Sum balance across all token accounts per mint (can have multiple ATAs)."""
+    by_mint: dict[str, dict] = {}
 
     for rpc_url in [SOLANA_SEND_RPC_URL, HELIUS_RPC_URL]:
         for program_id in TOKEN_PROGRAMS:
@@ -70,7 +74,7 @@ async def get_all_token_accounts(session: aiohttp.ClientSession, pubkey: str) ->
                 for acc in accounts:
                     info = acc["account"]["data"]["parsed"]["info"]
                     mint = info["mint"]
-                    if mint == SOL_MINT or mint in seen_mints:
+                    if mint in (SOL_MINT, USDC_MINT):
                         continue
                     decimals = int(info["tokenAmount"]["decimals"])
                     raw_amount = int(info["tokenAmount"]["amount"])
@@ -78,13 +82,18 @@ async def get_all_token_accounts(session: aiohttp.ClientSession, pubkey: str) ->
                         continue
                     ui = info["tokenAmount"]["uiAmount"]
                     amount = float(ui) if ui is not None else raw_amount / (10**decimals)
-                    seen_mints.add(mint)
-                    tokens.append({"mint": mint, "amount": amount,
-                                   "decimals": decimals, "raw_amount": raw_amount})
+                    if mint in by_mint:
+                        by_mint[mint]["raw_amount"] += raw_amount
+                        by_mint[mint]["amount"] += amount
+                    else:
+                        by_mint[mint] = {
+                            "mint": mint, "amount": amount,
+                            "decimals": decimals, "raw_amount": raw_amount,
+                        }
             except Exception as exc:
                 logger.warning("RPC call failed: %s", exc)
-        if tokens:
-            return tokens
+        if by_mint:
+            return list(by_mint.values())
     return []
 
 # ── Get Jupiter quote ─────────────────────────────────────────────────────────
@@ -92,7 +101,7 @@ async def get_quote(session: aiohttp.ClientSession, mint: str, raw_amount: int) 
     try:
         async with session.get(JUPITER_QUOTE_URL, params={
             "inputMint": mint,
-            "outputMint": SOL_MINT,
+            "outputMint": EXIT_MINT,
             "amount": str(raw_amount),
             "slippageBps": str(DEFAULT_SLIPPAGE_BPS),
         }, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -159,15 +168,15 @@ async def main():
             return
 
         # Get SOL quote for each token to show value
-        logger.info("\n%-20s  %15s  %12s" , "MINT", "AMOUNT", "SOL VALUE")
+        logger.info("\n%-20s  %15s  %12s" , "MINT", "AMOUNT", f"{EXIT_LABEL} VALUE")
         logger.info("-" * 55)
         for i, t in enumerate(tokens):
             quote = await get_quote(session, t["mint"], t["raw_amount"])
             if quote:
-                sol_val = int(quote.get("outAmount", 0)) / LAMPORTS_PER_SOL
+                exit_val = int(quote.get("outAmount", 0)) / (10 ** EXIT_DECIMALS)
                 t["quote"] = quote
-                t["sol_value"] = sol_val
-                logger.info("[%d] %-20s  %15.4f  %12.6f SOL", i+1, t["mint"][:20], t["amount"], sol_val)
+                t["exit_value"] = exit_val
+                logger.info("[%d] %-20s  %15.4f  %12.4f %s", i+1, t["mint"][:20], t["amount"], exit_val, EXIT_LABEL)
             else:
                 t["quote"] = None
                 t["sol_value"] = 0
@@ -203,8 +212,8 @@ async def main():
                 logger.warning("  → No Jupiter route for %s — skipping", mint[:8])
                 continue
 
-            sol_out = int(quote.get("outAmount", 0)) / LAMPORTS_PER_SOL
-            logger.info("  → %.6f SOL back", sol_out)
+            exit_out = int(quote.get("outAmount", 0)) / (10 ** EXIT_DECIMALS)
+            logger.info("  → %.4f %s back", exit_out, EXIT_LABEL)
 
             tx_sig = await execute_swap(session, quote, keypair)
             if tx_sig:
