@@ -127,6 +127,7 @@ class Position:
     closed: bool = False
     total_sol_received: float = 0.0
     partial_exits: list[dict[str, Any]] = field(default_factory=list)
+    price_miss_count: int = 0  # consecutive price fetch failures
 
 
 class RiskManager:
@@ -256,7 +257,16 @@ class RiskManager:
 
         current_price = await self.executor.get_token_price_usd(position.mint)
         if not current_price or current_price <= 0:
+            position.price_miss_count += 1
+            # Force-sell after 10 consecutive price failures (~50s) — token is likely dead/illiquid
+            if position.price_miss_count >= 10:
+                logger.warning(
+                    "Force-selling %s — price unavailable for %d consecutive checks",
+                    position.symbol, position.price_miss_count,
+                )
+                await self._close_position(position, "no_price_data", position.entry_price_usd)
             return
+        position.price_miss_count = 0  # reset on successful price fetch
 
         multiplier = self._current_multiplier(position, current_price)
         position.peak_multiplier = max(position.peak_multiplier, multiplier)
