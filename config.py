@@ -17,7 +17,6 @@ class TraderConfig:
 
 TRADERS: list[TraderConfig] = [
     TraderConfig("Cented", "@cented7", "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o", 0.05),
-    TraderConfig("decu", "@notdecu", "4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9", 0.1),
     TraderConfig("trunoest", "@trunoest", "ardinRsN1mNYVeoJWTBsWeYeXvuR9UUDGMsCDKpb6AT", 0.1),
     TraderConfig("Cupsey", "@cupseyy", "suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK", 0.1),
     TraderConfig("Cupsey", "@cupseyy", "2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f", 0.1),
