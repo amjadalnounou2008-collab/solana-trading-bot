@@ -80,6 +80,9 @@ COPY_REBUY_COOLDOWN_HOURS = 24     # after a losing exit, don't copy-buy same to
 MAX_BUYS_PER_DAY       = 3        # max new positions per day (copy + scanner combined)
 MAX_OPEN_POSITIONS     = 2        # never hold more than 2 coins at once
 DAILY_LOSS_LIMIT_USD   = 5.0      # stop buying for the day after $5 net loss
+# Lock in wins — stop NEW buys once daily profit hits this (sells still run)
+# Set via Railway env e.g. DAILY_PROFIT_TARGET_USD=50 or 100 or 500
+DAILY_PROFIT_TARGET_USD = float(os.getenv("DAILY_PROFIT_TARGET_USD", "50"))
 MIN_SOL_RESERVE        = 0.04     # always keep this much SOL for gas
 MIN_BUY_SOL            = 0.008    # skip trade if affordable size below this
 MAX_BUY_SOL            = 0.015    # never risk more than this per trade (~$2)

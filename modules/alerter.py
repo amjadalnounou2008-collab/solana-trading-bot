@@ -130,7 +130,7 @@ class Alerter:
     async def send_startup_message(self, lifetime_pnl: float = 0.0, lifetime_trades: int = 0) -> None:
         lines = [
             "<b>Solana Bot started</b>",
-            "• Max <b>3 buys/day</b>, stops at <b>-$5</b> daily loss",
+            "• Max <b>3 buys/day</b> | locks profit at <b>+$50/day</b> | stops at <b>-$5</b>",
             "• Every buy + sell → Telegram + trade log",
             "• Sells → <b>USDC</b> with running PnL totals",
         ]
