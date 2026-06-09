@@ -23,8 +23,7 @@ TRADERS: list[TraderConfig] = [
     # Tier 1 — best win rate + selective (milkybids picks)
     TraderConfig("jijo", "@gmgn", "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk", COPY_BUY_SOL),    # 84.6% WR, 79 txns/mo
     TraderConfig("Sheep", "@gmgn", "78N177fzNJpp8pG49xDv1efYcTMSzo9tPTKEA9mAVkh2", COPY_BUY_SOL),   # 89.3% WR
-    # nyhrox removed — bought drain token 236ziZWi twice on Jun 9 2026
-    # TraderConfig("nyhrox", "@gmgn", "6S8GezkxYUfZy9JPtYnanbcZTMB87Wjt1qx3c6ELajKC", COPY_BUY_SOL),
+    # nyhrox REMOVED — repeatedly buying drain tokens (236ziZ, 64fkyk → H9tCkQ3a7M drainer)
     # Tier 2 — more trades, still passes GMGN filters
     TraderConfig("AU73", "@gmgn", "AU73C47eNaF5yhpAgB2CtYqPxREGsXQkSsbqgahEYW6h", COPY_BUY_SOL),    # 65.5% WR, 63 txns
     TraderConfig("flock", "@gmgn", "F1WT79Jkw3BkBDUfCbrKKo15ghZNCEjvnjxQpiCfPuRM", COPY_BUY_SOL),  # 60% WR, 11 txns
