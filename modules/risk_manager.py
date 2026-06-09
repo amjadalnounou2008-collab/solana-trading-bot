@@ -60,6 +60,7 @@ def _pos_to_dict(p: "Position") -> dict:
         "score_breakdown": p.score_breakdown,
         "decimals": p.decimals,
         "peak_multiplier": p.peak_multiplier,
+        "last_multiplier": p.last_multiplier,
         "trailing_active": p.trailing_active,
         "trailing_peak_multiplier": p.trailing_peak_multiplier,
         "tp1_hit": p.tp1_hit,
@@ -88,6 +89,7 @@ def _dict_to_pos(d: dict) -> "Position":
         score_breakdown=d.get("score_breakdown"),
         decimals=d.get("decimals", 6),
         peak_multiplier=d.get("peak_multiplier", 1.0),
+        last_multiplier=d.get("last_multiplier", 1.0),
         trailing_active=d.get("trailing_active", False),
         trailing_peak_multiplier=d.get("trailing_peak_multiplier", 1.0),
         tp1_hit=d.get("tp1_hit", False),
@@ -207,6 +209,7 @@ class Position:
     score_breakdown: dict[str, Any] | None = None
     decimals: int = 6
     peak_multiplier: float = 1.0
+    last_multiplier: float = 1.0   # last polled value — used for paper PnL
     trailing_active: bool = False
     trailing_peak_multiplier: float = 1.0
     tp1_hit: bool = False
@@ -326,26 +329,24 @@ class RiskManager:
         position: Position,
         quote_received: float,
         sell_pct: float,
+        exit_reason: str = "",
     ) -> float:
-        """Paper PnL from price feed — Jupiter sell quotes can lie on illiquid memes."""
+        """Paper PnL from tracked multipliers — sell-time quotes/prices lie on memes."""
         spent = position.entry_cost_usd * (sell_pct / 100.0)
         if spent <= 0:
             return max(0.0, quote_received)
 
-        price_mult = 1.0
-        price = await self.executor.get_token_price_usd(position.mint)
-        if price and price > 0 and position.entry_price_usd > 0:
-            price_mult = self._current_multiplier(position, price)
-
-        model_usd = spent * price_mult
-        peak_cap = spent * max(position.peak_multiplier, 1.0) * 1.05
-        sanitized = max(0.0, min(model_usd, peak_cap))
+        # Use what monitoring saw while holding — never sell-time price spikes
+        exit_mult = position.last_multiplier if position.last_multiplier > 0 else 1.0
+        exit_mult = min(exit_mult, position.peak_multiplier * 1.02)
+        sanitized = max(0.0, spent * exit_mult)
 
         if quote_received > sanitized + 0.10 and quote_received > spent * 1.5:
             logger.warning(
-                "[PAPER] Ignoring bogus Jupiter sell quote $%.2f → $%.2f for %s "
-                "(price %.2fx, peak %.2fx)",
-                quote_received, sanitized, position.symbol, price_mult, position.peak_multiplier,
+                "[PAPER] Ignoring bogus sell quote $%.2f → $%.2f for %s "
+                "(tracked %.2fx, peak %.2fx, exit %s)",
+                quote_received, sanitized, position.symbol,
+                position.last_multiplier, position.peak_multiplier, exit_reason,
             )
         return round(sanitized, 4)
 
@@ -383,7 +384,7 @@ class RiskManager:
                         received * await self.executor.get_sol_price_usd()
                     )
                     received_usd = await self._paper_received_usd(
-                        position, quote_usd, sell_pct,
+                        position, quote_usd, sell_pct, exit_reason,
                     )
                     received = received_usd if SELL_TO_STABLE else (
                         received_usd / await self.executor.get_sol_price_usd()
@@ -552,11 +553,14 @@ class RiskManager:
             quote_sol = await self.executor.get_sell_quote_sol(position.mint, raw)
             if quote_sol and position.initial_sol > 0:
                 quote_mult = quote_sol / position.initial_sol
-                position.peak_multiplier = max(position.peak_multiplier, quote_mult)
+                if not self.executor.paper_trade:
+                    position.peak_multiplier = max(position.peak_multiplier, quote_mult)
                 quote_pnl_pct = (quote_mult - 1.0) * 100.0
-                if quote_pnl_pct > pnl_pct:
+                if quote_pnl_pct > pnl_pct and not self.executor.paper_trade:
                     pnl_pct = quote_pnl_pct
                     multiplier = quote_mult
+
+        position.last_multiplier = multiplier
 
         # Take profits FIRST — don't let a fast dump skip TP
         if multiplier >= TP1_MULTIPLIER and not position.tp1_hit:
