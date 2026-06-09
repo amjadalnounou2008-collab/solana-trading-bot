@@ -1,4 +1,7 @@
 .env
+trade_log.jsonl
+trade_stats.json
+positions.json
 __pycache__/
 *.pyc
 *.log

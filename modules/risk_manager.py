@@ -30,6 +30,7 @@ from config import (
     TRAILING_STOP_PCT,
 )
 from modules.alerter import Alerter, TradeAlert
+from modules.trade_journal import TradeStats, log_event
 from modules.utils import format_duration
 
 if TYPE_CHECKING:
@@ -53,6 +54,7 @@ def _pos_to_dict(p: "Position") -> dict:
         "initial_tokens": p.initial_tokens,
         "remaining_tokens": p.remaining_tokens,
         "initial_sol": p.initial_sol,
+        "entry_cost_usd": p.entry_cost_usd,
         "reason": p.reason,
         "score_breakdown": p.score_breakdown,
         "decimals": p.decimals,
@@ -80,6 +82,7 @@ def _dict_to_pos(d: dict) -> "Position":
         initial_tokens=d["initial_tokens"],
         remaining_tokens=d["remaining_tokens"],
         initial_sol=d["initial_sol"],
+        entry_cost_usd=d.get("entry_cost_usd", 0.0),
         reason=d["reason"],
         score_breakdown=d.get("score_breakdown"),
         decimals=d.get("decimals", 6),
@@ -198,6 +201,7 @@ class Position:
     initial_tokens: float
     remaining_tokens: float
     initial_sol: float
+    entry_cost_usd: float = 0.0   # SOL cost at buy time (for accurate PnL)
     reason: str
     score_breakdown: dict[str, Any] | None = None
     decimals: int = 6
@@ -228,6 +232,7 @@ class RiskManager:
         self._buys_today: int = 0
         self._daily_pnl_usd: float = 0.0
         self._halted_today: bool = False
+        self.stats = TradeStats.load()
 
     def _reset_daily_if_needed(self) -> None:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -276,6 +281,9 @@ class RiskManager:
         if not buy.success or buy.tokens_received <= 0:
             return
 
+        sol_price = await self.executor.get_sol_price_usd()
+        entry_cost_usd = buy.amount_sol * sol_price
+
         position = Position(
             position_id=buy.position_id,
             mint=buy.mint,
@@ -285,6 +293,7 @@ class RiskManager:
             initial_tokens=buy.tokens_received,
             remaining_tokens=buy.tokens_received,
             initial_sol=buy.amount_sol,
+            entry_cost_usd=entry_cost_usd,
             reason=buy.reason,
             score_breakdown=buy.score_breakdown,
             decimals=buy.decimals,
@@ -293,10 +302,15 @@ class RiskManager:
         self._reset_daily_if_needed()
         self._buys_today += 1
         await self._persist(position)
+        log_event(
+            "BUY", symbol=buy.symbol, mint=buy.mint,
+            cost_usd=round(entry_cost_usd, 2), sol=buy.amount_sol,
+            reason=buy.reason, tx=buy.tx_signature,
+        )
         logger.info(
-            "Position opened — %s | %.4f tokens @ $%.8f | buy %d/%d today",
+            "Position opened — %s | %.4f tokens @ $%.8f | buy %d/%d today | cost $%.2f",
             buy.symbol, buy.tokens_received, buy.entry_price_usd,
-            self._buys_today, MAX_BUYS_PER_DAY,
+            self._buys_today, MAX_BUYS_PER_DAY, entry_cost_usd,
         )
 
     def _current_multiplier(self, position: Position, current_price: float) -> float:
@@ -351,6 +365,19 @@ class RiskManager:
             unit = sell_result.exit_label or ("stable" if SELL_TO_STABLE else "SOL")
             logger.info("Partial sell — %s | %s | %.2f%% | %.4f %s",
                         position.symbol, exit_reason, sell_pct, sell_result.sol_received, unit)
+            if sell_pct < 99.0 and not sell_result.is_dust:
+                received_usd = sell_result.sol_received if SELL_TO_STABLE else (
+                    sell_result.sol_received * await self.executor.get_sol_price_usd()
+                )
+                remaining_pct = max(0.0, 100.0 - sell_pct)
+                log_event(
+                    "PARTIAL_SELL", symbol=position.symbol, mint=position.mint,
+                    sell_pct=sell_pct, received_usd=round(received_usd, 2),
+                    reason=exit_reason,
+                )
+                await self.alerter.send_partial_sell_alert(
+                    position.symbol, sell_pct, received_usd, exit_reason, remaining_pct,
+                )
             return True
 
         position.sell_fail_count += 1
@@ -377,16 +404,32 @@ class RiskManager:
 
         exit_time = datetime.now(timezone.utc)
         sol_price = await self.executor.get_sol_price_usd()
-        entry_usd = position.initial_sol * sol_price
-        if SELL_TO_STABLE:
-            pnl_usd = position.total_sol_received - entry_usd
-            pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0.0
-        else:
-            pnl_sol = position.total_sol_received - position.initial_sol
-            pnl_usd = pnl_sol * sol_price
+        spent_usd = position.entry_cost_usd or (position.initial_sol * sol_price)
+        received_usd = position.total_sol_received if SELL_TO_STABLE else (
+            position.total_sol_received * sol_price
+        )
+        pnl_usd = received_usd - spent_usd
+        pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0.0
 
-        spent_usd = entry_usd
-        received_usd = position.total_sol_received if SELL_TO_STABLE else position.total_sol_received * sol_price
+        self._reset_daily_if_needed()
+        self._daily_pnl_usd += pnl_usd
+        self.stats.lifetime_pnl_usd += pnl_usd
+        self.stats.lifetime_trades += 1
+        self.stats.total_spent_usd += spent_usd
+        self.stats.total_received_usd += received_usd
+        if pnl_usd >= 0:
+            self.stats.wins += 1
+        else:
+            self.stats.losses += 1
+        self.stats.save()
+
+        log_event(
+            "CLOSE", symbol=position.symbol, mint=position.mint,
+            spent_usd=round(spent_usd, 2), received_usd=round(received_usd, 2),
+            pnl_usd=round(pnl_usd, 2), exit_reason=exit_reason,
+            daily_pnl=round(self._daily_pnl_usd, 2),
+            lifetime_pnl=round(self.stats.lifetime_pnl_usd, 2),
+        )
 
         alert = TradeAlert(
             token_mint=position.mint,
@@ -402,13 +445,13 @@ class RiskManager:
             spent_usd=spent_usd,
             received_usd=received_usd,
             peak_multiplier=position.peak_multiplier,
+            daily_pnl_usd=self._daily_pnl_usd,
+            lifetime_pnl_usd=self.stats.lifetime_pnl_usd,
+            buys_today=self._buys_today,
             score_breakdown=position.score_breakdown,
             sol_price_usd=sol_price,
         )
         await self.alerter.send_trade_alert(alert)
-
-        self._reset_daily_if_needed()
-        self._daily_pnl_usd += pnl_usd
         if self._daily_pnl_usd <= -DAILY_LOSS_LIMIT_USD and not self._halted_today:
             self._halted_today = True
             await self.alerter.send_message(

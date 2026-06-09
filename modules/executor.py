@@ -457,6 +457,7 @@ class Executor:
                     await self.risk_manager.alerter.send_buy_alert(
                         symbol=symbol, mint=mint, amount_sol=amount_sol,
                         cost_usd=cost_usd, reason=reason, tx_sig=tx_sig,
+                        buys_today=self.risk_manager._buys_today,
                         score_breakdown=score_breakdown,
                     )
                 except Exception:

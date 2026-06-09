@@ -22,9 +22,12 @@ async def main() -> None:
 
     mode = "PAPER TRADE" if config.PAPER_TRADE else "LIVE TRADING"
     logger.info("=" * 60)
-    logger.info("Solana Memecoin AI Trading Bot starting — %s", mode)
-    logger.info("Tracking %d trader wallets", len(config.TRADERS))
-    logger.info("Scanner interval: %ds | Wallet poll: %ds", config.SCAN_INTERVAL_SECONDS, config.WALLET_POLL_INTERVAL_SECONDS)
+    logger.info("Solana Memecoin Trading Bot starting — %s", mode)
+    if config.ENABLE_COPY_TRADING and config.TRADERS:
+        logger.info("Copy trading ON — %d wallets", len(config.TRADERS))
+    else:
+        logger.info("Copy trading OFF — GMGN handles copies; bot scans market")
+    logger.info("Scanner interval: %ds", config.SCAN_INTERVAL_SECONDS)
     logger.info("=" * 60)
 
     if not config.HELIUS_API_KEY or config.HELIUS_API_KEY.startswith("your_"):
@@ -42,10 +45,16 @@ async def main() -> None:
         await risk_manager.initialize()   # connects to PostgreSQL, loads open positions
         executor.risk_manager = risk_manager
 
-        wallet_tracker = WalletTracker(session, executor)
         coin_scanner = CoinScanner(session, executor)
+        wallet_tracker = (
+            WalletTracker(session, executor)
+            if config.ENABLE_COPY_TRADING and config.TRADERS else None
+        )
 
-        await alerter.send_startup_message()
+        await alerter.send_startup_message(
+            lifetime_pnl=risk_manager.stats.lifetime_pnl_usd,
+            lifetime_trades=risk_manager.stats.lifetime_trades,
+        )
         logger.info("Wallet: %s", executor.public_key)
 
         shutdown_event = asyncio.Event()
@@ -53,7 +62,8 @@ async def main() -> None:
         def _handle_signal() -> None:
             logger.info("Shutdown signal received — stopping bot...")
             shutdown_event.set()
-            wallet_tracker.stop()
+            if wallet_tracker:
+                wallet_tracker.stop()
             coin_scanner.stop()
             risk_manager.stop()
 
@@ -66,13 +76,11 @@ async def main() -> None:
 
         logger.info("All modules running concurrently via asyncio.gather()")
 
-        results = await asyncio.gather(
-            wallet_tracker.run(),
-            coin_scanner.run(),
-            risk_manager.run(),
-            _run_until_shutdown(),
-            return_exceptions=True,
-        )
+        tasks = [coin_scanner.run(), risk_manager.run(), _run_until_shutdown()]
+        if wallet_tracker:
+            tasks.insert(0, wallet_tracker.run())
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for i, result in enumerate(results):
             if isinstance(result, Exception):
