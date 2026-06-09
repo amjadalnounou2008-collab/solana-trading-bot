@@ -7,7 +7,13 @@ from typing import Any
 
 import aiohttp
 
-from config import MAX_BUYS_PER_DAY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_SEND_URL
+from config import (
+    MAX_BUYS_PER_DAY,
+    PAPER_TRADE,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    TELEGRAM_SEND_URL,
+)
 from modules.utils import format_duration, format_usd
 
 logger = logging.getLogger("solana-bot.alerter")
@@ -71,8 +77,9 @@ class Alerter:
         buys_today: int = 0,
         score_breakdown: dict[str, Any] | None = None,
     ) -> None:
+        mode = "📝 PAPER — " if PAPER_TRADE else ""
         lines = [
-            f"<b>🟢 BOUGHT — {symbol}</b>",
+            f"<b>{mode}🟢 BOUGHT — {symbol}</b>",
             f"<b>Cost:</b> {amount_sol:.4f} SOL ({format_usd(cost_usd)})",
             f"<b>Why:</b> {reason}",
             f"<b>Buy #</b>{buys_today}/{MAX_BUYS_PER_DAY} today",
@@ -93,8 +100,9 @@ class Alerter:
         exit_reason: str,
         remaining_pct: float,
     ) -> None:
+        mode = "📝 PAPER — " if PAPER_TRADE else ""
         await self.send_message(
-            f"<b>📤 PARTIAL SELL — {symbol}</b>\n"
+            f"<b>{mode}📤 PARTIAL SELL — {symbol}</b>\n"
             f"<b>Sold:</b> {sell_pct:.0f}% ({exit_reason})\n"
             f"<b>USDC received:</b> {format_usd(received_usd)}\n"
             f"<b>Still holding:</b> {remaining_pct:.0f}%"
@@ -108,8 +116,9 @@ class Alerter:
         day_sign = "+" if alert.daily_pnl_usd >= 0 else ""
         life_sign = "+" if alert.lifetime_pnl_usd >= 0 else ""
 
+        mode = "📝 PAPER — " if PAPER_TRADE else ""
         lines = [
-            f"<b>{emoji} CLOSED → USDC — {alert.token_symbol}</b>",
+            f"<b>{mode}{emoji} CLOSED → USDC — {alert.token_symbol}</b>",
             "",
             f"<b>This trade</b>",
             f"  Spent: {format_usd(alert.spent_usd)}",
@@ -130,10 +139,14 @@ class Alerter:
     async def send_startup_message(self, lifetime_pnl: float = 0.0, lifetime_trades: int = 0) -> None:
         lines = [
             "<b>Solana Bot started</b>",
+        ]
+        if PAPER_TRADE:
+            lines.append("• Mode: <b>📝 PAPER TRADE</b> (simulated — no real txs)")
+        lines.extend([
             "• Max <b>3 buys/day</b> | locks profit at <b>+$50/day</b> | stops at <b>-$5</b>",
             "• Every buy + sell → Telegram + trade log",
             "• Sells → <b>USDC</b> with running PnL totals",
-        ]
+        ])
         if lifetime_trades > 0:
             sign = "+" if lifetime_pnl >= 0 else ""
             lines.append(

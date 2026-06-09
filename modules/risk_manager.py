@@ -321,6 +321,34 @@ class RiskManager:
             return 1.0
         return current_price / position.entry_price_usd
 
+    async def _paper_received_usd(
+        self,
+        position: Position,
+        quote_received: float,
+        sell_pct: float,
+    ) -> float:
+        """Paper PnL from price feed — Jupiter sell quotes can lie on illiquid memes."""
+        spent = position.entry_cost_usd * (sell_pct / 100.0)
+        if spent <= 0:
+            return max(0.0, quote_received)
+
+        price_mult = 1.0
+        price = await self.executor.get_token_price_usd(position.mint)
+        if price and price > 0 and position.entry_price_usd > 0:
+            price_mult = self._current_multiplier(position, price)
+
+        model_usd = spent * price_mult
+        peak_cap = spent * max(position.peak_multiplier, 1.0) * 1.05
+        sanitized = max(0.0, min(model_usd, peak_cap))
+
+        if quote_received > sanitized + 0.10 and quote_received > spent * 1.5:
+            logger.warning(
+                "[PAPER] Ignoring bogus Jupiter sell quote $%.2f → $%.2f for %s "
+                "(price %.2fx, peak %.2fx)",
+                quote_received, sanitized, position.symbol, price_mult, position.peak_multiplier,
+            )
+        return round(sanitized, 4)
+
     async def _sync_wallet_balance(self, position: Position) -> None:
         """Keep tracked balance in sync with what's actually in the wallet."""
         amount, decimals = await self.executor.get_token_balance(position.mint)
@@ -346,9 +374,20 @@ class RiskManager:
         )
         if sell_result.success:
             position.sell_fail_count = 0
+            received = sell_result.sol_received
             if sell_result.is_dust:
                 position.remaining_tokens = 0
             else:
+                if self.executor.paper_trade:
+                    quote_usd = received if SELL_TO_STABLE else (
+                        received * await self.executor.get_sol_price_usd()
+                    )
+                    received_usd = await self._paper_received_usd(
+                        position, quote_usd, sell_pct,
+                    )
+                    received = received_usd if SELL_TO_STABLE else (
+                        received_usd / await self.executor.get_sol_price_usd()
+                    )
                 await self._sync_wallet_balance(position)
                 if position.remaining_tokens > 0:
                     raw = int(position.remaining_tokens * (10 ** position.decimals))
@@ -357,20 +396,20 @@ class RiskManager:
                         logger.info("Dust cleared — %s ($%.2f left, stopping retries)",
                                       position.symbol, rem_usd)
                         position.remaining_tokens = 0
-                position.total_sol_received += sell_result.sol_received
+                position.total_sol_received += received
             position.partial_exits.append({
                 "reason": exit_reason,
                 "tokens": tokens_to_sell,
-                "sol": sell_result.sol_received,
+                "sol": received,
                 "time": datetime.now(timezone.utc),
             })
             await self._persist(position)
             unit = sell_result.exit_label or ("stable" if SELL_TO_STABLE else "SOL")
             logger.info("Partial sell — %s | %s | %.2f%% | %.4f %s",
-                        position.symbol, exit_reason, sell_pct, sell_result.sol_received, unit)
+                        position.symbol, exit_reason, sell_pct, received, unit)
             if sell_pct < 99.0 and not sell_result.is_dust:
-                received_usd = sell_result.sol_received if SELL_TO_STABLE else (
-                    sell_result.sol_received * await self.executor.get_sol_price_usd()
+                received_usd = received if SELL_TO_STABLE else (
+                    received * await self.executor.get_sol_price_usd()
                 )
                 remaining_pct = max(0.0, 100.0 - sell_pct)
                 log_event(
