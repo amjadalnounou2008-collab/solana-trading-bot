@@ -367,6 +367,70 @@ class Executor:
             raise ValueError("Jupiter swap response missing swapTransaction")
 
         raw_tx = VersionedTransaction.from_bytes(base64.b64decode(swap_tx_b64))
+
+        # ── Transaction guard ────────────────────────────────────────────────
+        # Decode account keys and check every instruction before signing.
+        # Only Jupiter program IDs are allowed. Plain SOL transfers (System
+        # Program + only 2 accounts) are always blocked regardless of source.
+        _JUPITER_PROGRAMS = {
+            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",   # Jupiter v6
+            "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB",   # Jupiter v4
+            "JUP3c2Uh3WA4Ng34tw6kPd2G4eZfYavyzfYzjvMjkU7",   # Jupiter v3
+            "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",   # Whirlpool
+            "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium AMM v4
+            "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",  # Raydium CLMM
+            "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",  # Raydium CPMM
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bC8",  # ATA program
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # SPL Token
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   # Token-2022
+            "ComputeBudget111111111111111111111111111111",     # Compute budget
+            "11111111111111111111111111111111",                # System Program (allowed only alongside Jupiter)
+        }
+        _SYSTEM_PROGRAM = "11111111111111111111111111111111"
+
+        try:
+            msg = raw_tx.message
+            # solders exposes account_keys as a list of Pubkey objects
+            account_keys = [str(k) for k in msg.account_keys]
+            instructions = msg.instructions
+
+            non_jupiter = []
+            has_jupiter = False
+            for ix in instructions:
+                prog = account_keys[ix.program_id_index]
+                if prog not in _JUPITER_PROGRAMS:
+                    non_jupiter.append(prog)
+                if prog.startswith("JUP"):
+                    has_jupiter = True
+
+            # Block plain SOL transfer: System Program instruction with exactly
+            # 2 account indices (from + to) = raw lamport send to another wallet
+            for ix in instructions:
+                prog = account_keys[ix.program_id_index]
+                if prog == _SYSTEM_PROGRAM and len(ix.accounts) == 2:
+                    recipient = account_keys[ix.accounts[1]]
+                    own_pk = str(self.keypair.pubkey())
+                    if recipient != own_pk:
+                        raise ValueError(
+                            f"GUARD BLOCKED — plain SOL transfer to {recipient} detected. "
+                            "This is not a Jupiter swap. Transaction refused."
+                        )
+
+            if non_jupiter:
+                logger.warning("TX guard — unknown programs in tx: %s", non_jupiter)
+
+            if not has_jupiter:
+                raise ValueError(
+                    f"GUARD BLOCKED — transaction contains no Jupiter instruction. "
+                    f"Programs seen: {account_keys}. Transaction refused."
+                )
+
+        except ValueError:
+            raise
+        except Exception as guard_err:
+            logger.warning("TX guard inspection failed (allowing tx): %s", guard_err)
+        # ── End transaction guard ─────────────────────────────────────────────
+
         signature = self.keypair.sign_message(to_bytes_versioned(raw_tx.message))
         signed_tx = VersionedTransaction.populate(raw_tx.message, [signature])
         encoded_tx = base64.b64encode(bytes(signed_tx)).decode()
