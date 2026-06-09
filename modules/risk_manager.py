@@ -201,8 +201,8 @@ class Position:
     initial_tokens: float
     remaining_tokens: float
     initial_sol: float
-    entry_cost_usd: float = 0.0   # SOL cost at buy time (for accurate PnL)
     reason: str
+    entry_cost_usd: float = 0.0   # SOL cost at buy time (for accurate PnL)
     score_breakdown: dict[str, Any] | None = None
     decimals: int = 6
     peak_multiplier: float = 1.0
