@@ -192,7 +192,7 @@ class WalletTracker:
             logger.info("Skipping — trader spent %.4f SOL (> %.0f max)", sol_spent, COPY_MAX_TRADER_SOL)
             return
 
-        can_buy, skip = self.executor.can_buy_mint(mint)
+        can_buy, skip = await self.executor.can_trade(mint)
         if not can_buy:
             logger.info("Skipping %s — %s", symbol, skip)
             return
@@ -241,10 +241,11 @@ class WalletTracker:
             "trader": f"{trader.name} ({trader.handle})",
             "trader_spent": f"{sol_spent:.3f} SOL",
         }
+        buy_sol = await self.executor.calc_buy_size_sol()
         reason = f"Copy {trader.name} — bought {symbol}"
         await self.executor.buy_token(
             mint=mint,
-            amount_sol=trader.copy_amount_sol,
+            amount_sol=buy_sol,
             reason=reason,
             symbol=symbol,
             score_breakdown=breakdown,

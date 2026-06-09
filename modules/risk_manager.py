@@ -10,8 +10,11 @@ from typing import TYPE_CHECKING, Any
 
 from config import (
     COPY_REBUY_COOLDOWN_HOURS,
+    DAILY_LOSS_LIMIT_USD,
     DUST_BALANCE_USD,
+    MAX_BUYS_PER_DAY,
     MAX_HOLD_MINUTES,
+    MAX_OPEN_POSITIONS,
     RISK_POLL_INTERVAL_SECONDS,
     SELL_TO_STABLE,
     STOP_LOSS_PCT,
@@ -221,6 +224,31 @@ class RiskManager:
         self.positions: dict[str, Position] = {}
         self._running = False
         self._loss_cooldown: dict[str, datetime] = {}  # mint → don't rebuy until expired
+        self._trading_date: str = ""
+        self._buys_today: int = 0
+        self._daily_pnl_usd: float = 0.0
+        self._halted_today: bool = False
+
+    def _reset_daily_if_needed(self) -> None:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._trading_date != today:
+            self._trading_date = today
+            self._buys_today = 0
+            self._daily_pnl_usd = 0.0
+            self._halted_today = False
+
+    def open_position_count(self) -> int:
+        return sum(1 for p in self.positions.values() if not p.closed)
+
+    async def can_open_new_trade(self) -> tuple[bool, str]:
+        self._reset_daily_if_needed()
+        if self._halted_today:
+            return False, f"daily loss limit hit (${DAILY_LOSS_LIMIT_USD:.0f})"
+        if self._buys_today >= MAX_BUYS_PER_DAY:
+            return False, f"max {MAX_BUYS_PER_DAY} buys/day reached"
+        if self.open_position_count() >= MAX_OPEN_POSITIONS:
+            return False, f"max {MAX_OPEN_POSITIONS} open positions"
+        return True, ""
 
     def is_holding(self, mint: str) -> bool:
         return any(not p.closed and p.mint == mint for p in self.positions.values())
@@ -262,10 +290,13 @@ class RiskManager:
             decimals=buy.decimals,
         )
         self.positions[buy.position_id] = position
+        self._reset_daily_if_needed()
+        self._buys_today += 1
         await self._persist(position)
         logger.info(
-            "Position opened — %s | %.4f tokens @ $%.8f | monitoring started",
+            "Position opened — %s | %.4f tokens @ $%.8f | buy %d/%d today",
             buy.symbol, buy.tokens_received, buy.entry_price_usd,
+            self._buys_today, MAX_BUYS_PER_DAY,
         )
 
     def _current_multiplier(self, position: Position, current_price: float) -> float:
@@ -375,6 +406,17 @@ class RiskManager:
             sol_price_usd=sol_price,
         )
         await self.alerter.send_trade_alert(alert)
+
+        self._reset_daily_if_needed()
+        self._daily_pnl_usd += pnl_usd
+        if self._daily_pnl_usd <= -DAILY_LOSS_LIMIT_USD and not self._halted_today:
+            self._halted_today = True
+            await self.alerter.send_message(
+                f"<b>⛔ Trading paused for today</b>\n"
+                f"Daily PnL: ${self._daily_pnl_usd:.2f}\n"
+                f"Limit: -${DAILY_LOSS_LIMIT_USD:.0f}\n"
+                f"No new buys until tomorrow."
+            )
 
         if pnl_usd < 0:
             self._loss_cooldown[position.mint] = exit_time + timedelta(hours=COPY_REBUY_COOLDOWN_HOURS)

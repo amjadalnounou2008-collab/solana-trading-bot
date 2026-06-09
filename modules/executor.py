@@ -17,12 +17,16 @@ from solders.transaction import VersionedTransaction
 import config
 from config import (
     BUY_MINT_COOLDOWN_SEC,
+    BUY_SIZE_PCT_OF_WALLET,
     DEFAULT_SLIPPAGE_BPS,
+    HELIUS_RPC_URL,
+    MAX_BUY_SOL,
+    MIN_BUY_SOL,
+    MIN_SOL_RESERVE,
     DUST_BALANCE_USD,
     EXIT_DECIMALS,
     EXIT_LABELS,
     EXIT_MINTS,
-    HELIUS_RPC_URL,
     JUPITER_MIN_INTERVAL_SEC,
     JUPITER_429_RETRIES,
     JUPITER_PRICE_URL,
@@ -104,6 +108,44 @@ class Executor:
             if rm.on_cooldown(mint):
                 return False, "on loss cooldown"
         return True, ""
+
+    async def can_trade(self, mint: str) -> tuple[bool, str]:
+        ok, reason = self.can_buy_mint(mint)
+        if not ok:
+            return ok, reason
+        rm = self.risk_manager
+        if rm:
+            ok, reason = await rm.can_open_new_trade()
+            if not ok:
+                return False, reason
+        size = await self.calc_buy_size_sol()
+        if size < MIN_BUY_SOL:
+            return False, f"wallet too low ({size:.4f} SOL tradeable, need {MIN_BUY_SOL})"
+        return True, ""
+
+    async def get_wallet_sol_balance(self) -> float:
+        if self.paper_trade or not self.keypair:
+            return 1.0
+        body = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getBalance",
+            "params": [str(self.keypair.pubkey())],
+        }
+        for rpc in (HELIUS_RPC_URL, SOLANA_SEND_RPC_URL):
+            try:
+                async with self.session.post(rpc, json=body) as resp:
+                    data = await resp.json()
+                    lamports = int(data.get("result", {}).get("value", 0))
+                    return lamports / LAMPORTS_PER_SOL
+            except Exception:
+                continue
+        return 0.0
+
+    async def calc_buy_size_sol(self) -> float:
+        balance = await self.get_wallet_sol_balance()
+        tradeable = max(balance - MIN_SOL_RESERVE, 0.0)
+        size = min(MAX_BUY_SOL, tradeable * BUY_SIZE_PCT_OF_WALLET)
+        return round(size, 4)
 
     async def _throttle_jupiter(self) -> None:
         async with self._jupiter_lock:
@@ -360,9 +402,18 @@ class Executor:
     ) -> BuyResult:
         logger.info("BUY signal — %s (%s) for %.4f SOL — %s", symbol, mint[:8], amount_sol, reason)
 
-        ok, skip_reason = self.can_buy_mint(mint)
+        ok, skip_reason = await self.can_trade(mint)
         if not ok:
             logger.info("BUY skip %s — %s", symbol, skip_reason)
+            return BuyResult(
+                success=False, mint=mint, symbol=symbol, amount_sol=amount_sol,
+                tokens_received=0, entry_price_usd=0, tx_signature=None,
+                reason=reason, score_breakdown=score_breakdown,
+            )
+
+        amount_sol = min(amount_sol, await self.calc_buy_size_sol())
+        if amount_sol < MIN_BUY_SOL:
+            logger.info("BUY skip %s — size %.4f SOL below minimum", symbol, amount_sol)
             return BuyResult(
                 success=False, mint=mint, symbol=symbol, amount_sol=amount_sol,
                 tokens_received=0, entry_price_usd=0, tx_signature=None,

@@ -17,7 +17,7 @@ class TraderConfig:
 
 # Copy best GMGN-vetted traders + autonomous market scanner (both run together)
 ENABLE_COPY_TRADING = True
-COPY_BUY_SOL = 0.03   # per copy trade — small for ~$30 balance
+COPY_BUY_SOL = 0.015  # fallback cap — actual size is wallet-based (see BUY_SIZE_*)
 
 TRADERS: list[TraderConfig] = [
     # Tier 1 — best win rate + selective (milkybids picks)
@@ -76,16 +76,25 @@ COPY_MIN_GRADUATED_LIQUIDITY_USD = 15_000
 COPY_SKIP_IF_HOLDING = True         # don't buy same token twice
 COPY_REBUY_COOLDOWN_HOURS = 24     # after a losing exit, don't copy-buy same token again
 
+# Trade budget — stop overtrading (main cause of losses)
+MAX_BUYS_PER_DAY       = 3        # max new positions per day (copy + scanner combined)
+MAX_OPEN_POSITIONS     = 2        # never hold more than 2 coins at once
+DAILY_LOSS_LIMIT_USD   = 5.0      # stop buying for the day after $5 net loss
+MIN_SOL_RESERVE        = 0.04     # always keep this much SOL for gas
+MIN_BUY_SOL            = 0.008    # skip trade if affordable size below this
+MAX_BUY_SOL            = 0.015    # never risk more than this per trade (~$2)
+BUY_SIZE_PCT_OF_WALLET = 0.08     # each buy = 8% of tradeable SOL
+
 # Scanner settings — autonomous discovery (Axiom Pulse "graduated" style)
-SCAN_INTERVAL_SECONDS  = 12
-SCAN_MIN_SCORE         = 62
+SCAN_INTERVAL_SECONDS  = 30       # slower scan = fewer impulse buys
+SCAN_MIN_SCORE         = 72       # only strong setups (was 62)
 SCAN_MIN_LIQUIDITY_USD = 15_000   # graduated pool minimum
 SCAN_MIN_MCAP_USD      = 25_000   # skip micro-dead coins
 SCAN_MAX_MCAP_USD      = 600_000  # memecoin sweet spot
 SCAN_MIN_AGE_HOURS     = 0.5      # at least 30 min old
 SCAN_GRADUATED_ONLY    = True     # Raydium/Orca/Meteora only — sellable
 SCAN_REQUIRE_SELL_TEST = True     # verify Jupiter sell route BEFORE buying
-SCANNER_BUY_SOL        = 0.03     # small size for ~$30 balance
+SCANNER_BUY_SOL        = MAX_BUY_SOL
 
 # Wallet tracker settings
 WALLET_POLL_INTERVAL_SECONDS = 20  # 8 wallets × 1s gap = ~28s per full cycle, stays under free tier

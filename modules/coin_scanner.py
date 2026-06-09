@@ -415,7 +415,7 @@ class CoinScanner:
             from config import LAMPORTS_PER_SOL
             from modules.utils import sol_to_lamports
 
-            can_buy, skip = self.executor.can_buy_mint(mint)
+            can_buy, skip = await self.executor.can_trade(mint)
             if not can_buy:
                 logger.info("Scanner skip %s (score %.0f) — %s", symbol, score, skip)
                 return
@@ -435,9 +435,10 @@ class CoinScanner:
                 f"mcap ${market_cap:,.0f} | liq ${liquidity_usd:,.0f} | {dex}"
             )
             logger.info("BUY signal — %s scored %.0f (sell route verified)", symbol, score)
+            buy_sol = await self.executor.calc_buy_size_sol()
             await self.executor.buy_token(
                 mint=mint,
-                amount_sol=SCANNER_BUY_SOL,
+                amount_sol=buy_sol,
                 reason=reason,
                 symbol=symbol,
                 score_breakdown=breakdown,
@@ -512,7 +513,7 @@ class CoinScanner:
 
             threshold = SCAN_MIN_SCORE - 5  # slightly lower threshold for GMGN (57)
             if boosted_score >= threshold:
-                can_buy, skip = self.executor.can_buy_mint(mint)
+                can_buy, skip = await self.executor.can_trade(mint)
                 if not can_buy:
                     logger.info("GMGN skip %s — %s", symbol, skip)
                     return
