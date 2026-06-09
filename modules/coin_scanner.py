@@ -529,9 +529,10 @@ class CoinScanner:
 
                 reason = f"GMGN {source} — score {boosted_score}/100 (raw {score}, threshold {threshold})"
                 logger.info("BUY signal from GMGN [%s] — %s scored %d", source, symbol, boosted_score)
+                buy_sol = await self.executor.calc_buy_size_sol()
                 await self.executor.buy_token(
                     mint=mint,
-                    amount_sol=DEFAULT_BUY_SOL,
+                    amount_sol=buy_sol,
                     reason=reason,
                     symbol=symbol,
                     score_breakdown=breakdown,
