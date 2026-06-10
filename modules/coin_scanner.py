@@ -65,8 +65,14 @@ class CoinScanner:
     def __init__(self, session: aiohttp.ClientSession, executor: "Executor") -> None:
         self.session = session
         self.executor = executor
-        self._seen_mints: set[str] = set()
+        # Permanent for this session — filter failures (rug, liq, mcap, etc.)
+        self._filter_rejected: set[str] = set()
+        # Scored below threshold — avoid re-scoring every cycle
+        self._scored_low: set[str] = set()
         self._running = False
+
+    def _already_processed(self, mint: str) -> bool:
+        return mint in self._filter_rejected or mint in self._scored_low
 
     async def _fetch_latest_profiles(self) -> list[str]:
         data = await fetch_json(
@@ -163,7 +169,8 @@ class CoinScanner:
             too_risky = score > 500
             return not (is_honeypot or rugged or too_risky), score
         except Exception:
-            return True, 50.0
+            logger.info("RugCheck unavailable for %s — skipping (fail closed)", mint[:8])
+            return False, 999.0
 
     async def _birdeye_data(self, mint: str) -> dict[str, Any]:
         if not BIRDEYE_API_KEY or BIRDEYE_API_KEY.startswith("your_"):
@@ -343,12 +350,12 @@ class CoinScanner:
         return total, breakdown
 
     async def _evaluate_token(self, mint: str) -> None:
-        if mint in self._seen_mints:
+        if self._already_processed(mint):
             return
 
         pair = await self._fetch_pair_data(mint)
         if not pair:
-            self._seen_mints.add(mint)
+            self._filter_rejected.add(mint)
             return
 
         symbol = pair.get("baseToken", {}).get("symbol", "UNKNOWN")
@@ -360,25 +367,25 @@ class CoinScanner:
         if liquidity_usd < SCAN_MIN_LIQUIDITY_USD:
             logger.info("Scanner skip %s — liquidity $%.0f < $%.0f",
                         symbol, liquidity_usd, SCAN_MIN_LIQUIDITY_USD)
-            self._seen_mints.add(mint)
+            self._filter_rejected.add(mint)
             return
 
         if market_cap < SCAN_MIN_MCAP_USD:
             logger.info("Scanner skip %s — mcap $%.0f < $%.0f",
                         symbol, market_cap, SCAN_MIN_MCAP_USD)
-            self._seen_mints.add(mint)
+            self._filter_rejected.add(mint)
             return
 
         if market_cap > SCAN_MAX_MCAP_USD:
             logger.info("Scanner skip %s — mcap $%.0f > $%.0f (too big)",
                         symbol, market_cap, SCAN_MAX_MCAP_USD)
-            self._seen_mints.add(mint)
+            self._filter_rejected.add(mint)
             return
 
         if SCAN_GRADUATED_ONLY and not self._is_graduated(pair):
             logger.info("Scanner skip %s — not graduated (dex=%s, need Raydium/Orca)",
                         symbol, dex)
-            self._seen_mints.add(mint)
+            self._filter_rejected.add(mint)
             return
 
         pair_created = pair.get("pairCreatedAt")
@@ -389,13 +396,13 @@ class CoinScanner:
             if age_hours < SCAN_MIN_AGE_HOURS:
                 logger.info("Scanner skip %s — only %.1fh old (min %.1fh)",
                             symbol, age_hours, SCAN_MIN_AGE_HOURS)
-                self._seen_mints.add(mint)
+                self._filter_rejected.add(mint)
                 return
 
         rugcheck_ok, rugcheck_score = await self._rugcheck_score(mint)
         if not rugcheck_ok:
             logger.info("Scanner skip %s — RugCheck flagged (score %.0f)", symbol, rugcheck_score)
-            self._seen_mints.add(mint)
+            self._filter_rejected.add(mint)
             return
 
         birdeye = await self._birdeye_data(mint)
@@ -409,40 +416,41 @@ class CoinScanner:
             f"{volume_24h:,.0f}", dex, age_hours,
         )
 
-        self._seen_mints.add(mint)
+        if score < SCAN_MIN_SCORE:
+            self._scored_low.add(mint)
+            return
 
-        if score >= SCAN_MIN_SCORE:
-            from config import LAMPORTS_PER_SOL
-            from modules.utils import sol_to_lamports
+        from config import LAMPORTS_PER_SOL
+        from modules.utils import sol_to_lamports
 
-            can_buy, skip = await self.executor.can_trade(mint)
-            if not can_buy:
-                logger.info("Scanner skip %s (score %.0f) — %s", symbol, score, skip)
-                return
+        can_buy, skip = await self.executor.can_trade(mint)
+        if not can_buy:
+            logger.info("Scanner skip %s (score %.0f) — %s", symbol, score, skip)
+            return
 
-            buy_quote = await self.executor.get_quote(
-                SOL_MINT, mint, sol_to_lamports(SCANNER_BUY_SOL),
+        buy_quote = await self.executor.get_quote(
+            SOL_MINT, mint, sol_to_lamports(SCANNER_BUY_SOL),
+        )
+        if not await self._verify_sell_route(mint, buy_quote):
+            logger.info(
+                "Scanner skip %s (score %.0f) — cannot sell on Jupiter (honeypot/no route)",
+                symbol, score,
             )
-            if not await self._verify_sell_route(mint, buy_quote):
-                logger.info(
-                    "Scanner skip %s (score %.0f) — cannot sell on Jupiter (honeypot/no route)",
-                    symbol, score,
-                )
-                return
+            return
 
-            reason = (
-                f"Scanner discovery — score {score:.0f}/100 | "
-                f"mcap ${market_cap:,.0f} | liq ${liquidity_usd:,.0f} | {dex}"
-            )
-            logger.info("BUY signal — %s scored %.0f (sell route verified)", symbol, score)
-            buy_sol = await self.executor.calc_buy_size_sol()
-            await self.executor.buy_token(
-                mint=mint,
-                amount_sol=buy_sol,
-                reason=reason,
-                symbol=symbol,
-                score_breakdown=breakdown,
-            )
+        reason = (
+            f"Scanner discovery — score {score:.0f}/100 | "
+            f"mcap ${market_cap:,.0f} | liq ${liquidity_usd:,.0f} | {dex}"
+        )
+        logger.info("BUY signal — %s scored %.0f (sell route verified)", symbol, score)
+        buy_sol = await self.executor.calc_buy_size_sol()
+        await self.executor.buy_token(
+            mint=mint,
+            amount_sol=buy_sol,
+            reason=reason,
+            symbol=symbol,
+            score_breakdown=breakdown,
+        )
 
     async def _fetch_gmgn_trending(self) -> list[str]:
         """Fetch trending tokens from GMGN ranked by 1h swap volume."""
@@ -484,9 +492,8 @@ class CoinScanner:
 
     async def _evaluate_gmgn_token(self, mint: str, source: str) -> None:
         """Evaluate a GMGN-sourced token — uses lower score threshold since pre-filtered."""
-        if mint in self._seen_mints:
+        if self._already_processed(mint):
             return
-        self._seen_mints.add(mint)
 
         try:
             pair = await self._fetch_pair_data(mint)
@@ -497,6 +504,7 @@ class CoinScanner:
             rugcheck_ok, rugcheck_score = await self._rugcheck_score(mint)
             if not rugcheck_ok:
                 logger.info("GMGN skip %s — RugCheck flagged", symbol)
+                self._filter_rejected.add(mint)
                 return
 
             birdeye = await self._birdeye_data(mint)
@@ -512,31 +520,34 @@ class CoinScanner:
             )
 
             threshold = SCAN_MIN_SCORE - 5  # slightly lower threshold for GMGN (57)
-            if boosted_score >= threshold:
-                can_buy, skip = await self.executor.can_trade(mint)
-                if not can_buy:
-                    logger.info("GMGN skip %s — %s", symbol, skip)
-                    return
+            if boosted_score < threshold:
+                self._scored_low.add(mint)
+                return
 
-                # Verify Jupiter can price this token before buying
-                jupiter_price = await self.executor.get_token_price_usd(mint)
-                if not jupiter_price or jupiter_price <= 0:
-                    logger.info(
-                        "GMGN skip %s (score %d) — Jupiter has no price, skipping",
-                        symbol, boosted_score,
-                    )
-                    return
+            can_buy, skip = await self.executor.can_trade(mint)
+            if not can_buy:
+                logger.info("GMGN skip %s — %s", symbol, skip)
+                return
 
-                reason = f"GMGN {source} — score {boosted_score}/100 (raw {score}, threshold {threshold})"
-                logger.info("BUY signal from GMGN [%s] — %s scored %d", source, symbol, boosted_score)
-                buy_sol = await self.executor.calc_buy_size_sol()
-                await self.executor.buy_token(
-                    mint=mint,
-                    amount_sol=buy_sol,
-                    reason=reason,
-                    symbol=symbol,
-                    score_breakdown=breakdown,
+            # Verify Jupiter can price this token before buying
+            jupiter_price = await self.executor.get_token_price_usd(mint)
+            if not jupiter_price or jupiter_price <= 0:
+                logger.info(
+                    "GMGN skip %s (score %d) — Jupiter has no price, skipping",
+                    symbol, boosted_score,
                 )
+                return
+
+            reason = f"GMGN {source} — score {boosted_score}/100 (raw {score}, threshold {threshold})"
+            logger.info("BUY signal from GMGN [%s] — %s scored %d", source, symbol, boosted_score)
+            buy_sol = await self.executor.calc_buy_size_sol()
+            await self.executor.buy_token(
+                mint=mint,
+                amount_sol=buy_sol,
+                reason=reason,
+                symbol=symbol,
+                score_breakdown=breakdown,
+            )
         except Exception as exc:
             logger.error("Error evaluating GMGN token %s: %s", mint[:8], exc)
 
@@ -546,16 +557,20 @@ class CoinScanner:
         profiles = await self._fetch_latest_profiles()
         boosts = await self._fetch_dexscreener_boosts()
         birdeye = await self._fetch_birdeye_trending()
+        gmgn_trending = await self._fetch_gmgn_trending()
+        gmgn_signals = await self._fetch_gmgn_signals()
 
         for source_mints in (profiles, boosts, birdeye):
             for mint in source_mints:
-                if mint and mint not in self._seen_mints and mint not in candidates:
+                if mint and not self._already_processed(mint) and mint not in candidates:
                     candidates.append(mint)
 
-        if candidates:
+        if candidates or gmgn_trending or gmgn_signals:
             logger.info(
-                "Scanner cycle — %d candidates (profiles=%d boosts=%d birdeye=%d)",
+                "Scanner cycle — %d dex candidates (profiles=%d boosts=%d birdeye=%d) | "
+                "GMGN trending=%d signals=%d",
                 len(candidates), len(profiles), len(boosts), len(birdeye),
+                len(gmgn_trending), len(gmgn_signals),
             )
 
         for mint in candidates[:20]:
@@ -564,10 +579,22 @@ class CoinScanner:
             except Exception as exc:
                 logger.error("Error evaluating %s: %s", mint[:8], exc)
 
+        for mint in gmgn_signals[:10]:
+            try:
+                await self._evaluate_gmgn_token(mint, "signals")
+            except Exception as exc:
+                logger.error("Error evaluating GMGN signal %s: %s", mint[:8], exc)
+
+        for mint in gmgn_trending[:10]:
+            try:
+                await self._evaluate_gmgn_token(mint, "trending")
+            except Exception as exc:
+                logger.error("Error evaluating GMGN trending %s: %s", mint[:8], exc)
+
     async def run(self) -> None:
         self._running = True
         logger.info(
-            "Market scanner started — DexScreener + Birdeye every %ds | "
+            "Market scanner started — DexScreener + Birdeye + GMGN every %ds | "
             "graduated only | min score %d | buy %.3f SOL",
             SCAN_INTERVAL_SECONDS, SCAN_MIN_SCORE, SCANNER_BUY_SOL,
         )

@@ -16,6 +16,7 @@ from config import (
     DEXSCREENER_TOKEN_URL,
     HELIUS_API_KEY,
     HELIUS_TX_URL,
+    RUGCHECK_URL,
     CASH_MINT,
     SELL_SLIPPAGE_BPS,
     SOL_MINT,
@@ -150,6 +151,24 @@ class WalletTracker:
         graduated_dexes = {"raydium", "orca", "meteora", "pumpswap"}
         return dex in graduated_dexes and liq >= COPY_MIN_GRADUATED_LIQUIDITY_USD
 
+    async def _rugcheck_ok(self, mint: str) -> bool:
+        try:
+            url = RUGCHECK_URL.format(mint=mint)
+            data = await fetch_json(self.session, "GET", url, label=f"RugCheck {mint[:8]}")
+            score = float(data.get("score", 0) or 0)
+            risks = data.get("risks", []) or []
+            is_honeypot = any(
+                "honeypot" in str(r.get("name", "")).lower()
+                or "cannot sell" in str(r.get("description", "")).lower()
+                for r in risks
+            )
+            if data.get("rugged") or is_honeypot or score > 500:
+                return False
+            return True
+        except Exception:
+            logger.info("Skipping %s — RugCheck unavailable", mint[:8])
+            return False
+
     def _already_holding(self, mint: str) -> bool:
         rm = self.executor.risk_manager
         return rm.is_holding(mint) if rm else False
@@ -205,6 +224,14 @@ class WalletTracker:
                 )
                 return
 
+        if COPY_SKIP_IF_HOLDING and self._already_holding(mint):
+            logger.info("Skipping %s — already holding", symbol)
+            return
+
+        if not await self._rugcheck_ok(mint):
+            logger.info("Skipping %s — RugCheck failed (honeypot/rug/high risk)", symbol)
+            return
+
         market_cap = await self._get_market_cap(mint)
         if market_cap and market_cap > COPY_MAX_MARKET_CAP_USD:
             logger.info(
@@ -223,7 +250,7 @@ class WalletTracker:
             sell_quote, _ = await self.executor._get_exit_quote(
                 mint, test_amount, SELL_SLIPPAGE_BPS,
             )
-            if not sell_quote:
+            if not sell_quote or int(sell_quote.get("outAmount", 0)) <= 0:
                 logger.info("Skipping %s — Jupiter sell route failed (unsellable)", symbol)
                 return
         except Exception:

@@ -67,6 +67,8 @@ def _pos_to_dict(p: "Position") -> dict:
         "tp2_hit": p.tp2_hit,
         "tp3_hit": p.tp3_hit,
         "total_sol_received": p.total_sol_received,
+        "price_miss_count": p.price_miss_count,
+        "sell_fail_count": p.sell_fail_count,
         "partial_exits": [
             {k: str(v) if isinstance(v, datetime) else v for k, v in e.items()}
             for e in p.partial_exits
@@ -96,6 +98,9 @@ def _dict_to_pos(d: dict) -> "Position":
         tp2_hit=d.get("tp2_hit", False),
         tp3_hit=d.get("tp3_hit", False),
         total_sol_received=d.get("total_sol_received", 0.0),
+        partial_exits=d.get("partial_exits", []),
+        price_miss_count=d.get("price_miss_count", 0),
+        sell_fail_count=d.get("sell_fail_count", 0),
     )
 
 
@@ -348,11 +353,14 @@ class RiskManager:
         self,
         position: Position,
         quote_received: float,
-        sell_pct: float,
+        tokens_to_sell: float,
         exit_reason: str = "",
     ) -> float:
         """Paper partial sell — never trust Jupiter sell quotes."""
-        spent = position.entry_cost_usd * (sell_pct / 100.0)
+        if position.initial_tokens <= 0:
+            return 0.0
+        fraction = min(1.0, tokens_to_sell / position.initial_tokens)
+        spent = position.entry_cost_usd * fraction
         if spent <= 0:
             return 0.0
 
@@ -402,10 +410,17 @@ class RiskManager:
                         received * await self.executor.get_sol_price_usd()
                     )
                     received_usd = await self._paper_received_usd(
-                        position, quote_usd, sell_pct, exit_reason,
+                        position, quote_usd, tokens_to_sell, exit_reason,
                     )
                     received = received_usd if SELL_TO_STABLE else (
                         received_usd / await self.executor.get_sol_price_usd()
+                    )
+                    position.remaining_tokens = max(
+                        0.0, position.remaining_tokens - tokens_to_sell,
+                    )
+                else:
+                    position.remaining_tokens = max(
+                        0.0, position.remaining_tokens - tokens_to_sell,
                     )
                 await self._sync_wallet_balance(position)
                 if position.remaining_tokens > 0:
@@ -430,7 +445,10 @@ class RiskManager:
                 received_usd = received if SELL_TO_STABLE else (
                     received * await self.executor.get_sol_price_usd()
                 )
-                remaining_pct = max(0.0, 100.0 - sell_pct)
+                remaining_pct = (
+                    (position.remaining_tokens / position.initial_tokens) * 100.0
+                    if position.initial_tokens > 0 else 0.0
+                )
                 log_event(
                     "PARTIAL_SELL", symbol=position.symbol, mint=position.mint,
                     sell_pct=sell_pct, received_usd=round(received_usd, 2),
@@ -467,8 +485,16 @@ class RiskManager:
         sol_price = await self.executor.get_sol_price_usd()
         spent_usd = position.entry_cost_usd or (position.initial_sol * sol_price)
         if self.executor.paper_trade:
+            partial_usd = position.total_sol_received if SELL_TO_STABLE else (
+                position.total_sol_received * sol_price
+            )
+            remaining_frac = (
+                position.remaining_tokens / position.initial_tokens
+                if position.initial_tokens > 0 else 0.0
+            )
+            remaining_cost = spent_usd * remaining_frac
             exit_mult = self._paper_exit_multiplier(position, exit_reason)
-            received_usd = round(spent_usd * exit_mult, 2)
+            received_usd = round(partial_usd + remaining_cost * exit_mult, 2)
         else:
             received_usd = position.total_sol_received if SELL_TO_STABLE else (
                 position.total_sol_received * sol_price

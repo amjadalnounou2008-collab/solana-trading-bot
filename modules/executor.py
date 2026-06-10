@@ -432,7 +432,10 @@ class Executor:
                         )
 
             if non_jupiter:
-                logger.warning("TX guard — unknown programs in tx: %s", non_jupiter)
+                raise ValueError(
+                    f"GUARD BLOCKED — unknown programs in tx: {non_jupiter}. "
+                    "Only Jupiter swap routes are allowed."
+                )
 
             if not has_jupiter:
                 raise ValueError(
@@ -443,7 +446,9 @@ class Executor:
         except ValueError:
             raise
         except Exception as guard_err:
-            logger.warning("TX guard inspection failed (allowing tx): %s", guard_err)
+            raise ValueError(
+                f"GUARD BLOCKED — could not verify transaction safety: {guard_err}"
+            ) from guard_err
         # ── End transaction guard ─────────────────────────────────────────────
 
         signature = self.keypair.sign_message(to_bytes_versioned(raw_tx.message))

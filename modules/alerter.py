@@ -8,6 +8,8 @@ from typing import Any
 import aiohttp
 
 from config import (
+    DAILY_LOSS_LIMIT_USD,
+    DAILY_PROFIT_TARGET_USD,
     MAX_BUYS_PER_DAY,
     PAPER_TRADE,
     TELEGRAM_BOT_TOKEN,
@@ -144,7 +146,8 @@ class Alerter:
             lines.append("• Mode: <b>📝 PAPER TRADE</b> (simulated — no real txs)")
             lines.append("• Paper PnL = tracked price only (not Jupiter quotes)")
         lines.extend([
-            "• Max <b>3 buys/day</b> | locks profit at <b>+$50/day</b> | stops at <b>-$5</b>",
+            f"• Max <b>{MAX_BUYS_PER_DAY} buys/day</b> | locks profit at "
+            f"<b>+${DAILY_PROFIT_TARGET_USD:.0f}/day</b> | stops at <b>-${DAILY_LOSS_LIMIT_USD:.0f}</b>",
             "• Every buy + sell → Telegram + trade log",
             "• Sells → <b>USDC</b> with running PnL totals",
         ])
