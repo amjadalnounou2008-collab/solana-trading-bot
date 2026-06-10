@@ -32,6 +32,8 @@ async def main() -> None:
 
     if not config.HELIUS_API_KEY or config.HELIUS_API_KEY.startswith("your_"):
         logger.warning("HELIUS_API_KEY not set — wallet tracking will fail")
+    birdeye = "ON" if config.BIRDEYE_API_KEY and not config.BIRDEYE_API_KEY.startswith("your_") else "OFF"
+    logger.info("Birdeye scanner data: %s", birdeye)
 
     # Force Google DNS — Railway's default DNS can't resolve jup.ag domains
     connector = aiohttp.TCPConnector(

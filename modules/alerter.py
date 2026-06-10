@@ -142,6 +142,7 @@ class Alerter:
         ]
         if PAPER_TRADE:
             lines.append("• Mode: <b>📝 PAPER TRADE</b> (simulated — no real txs)")
+            lines.append("• Paper PnL = tracked price only (not Jupiter quotes)")
         lines.extend([
             "• Max <b>3 buys/day</b> | locks profit at <b>+$50/day</b> | stops at <b>-$5</b>",
             "• Every buy + sell → Telegram + trade log",

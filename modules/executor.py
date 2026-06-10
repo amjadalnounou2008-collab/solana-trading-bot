@@ -258,6 +258,21 @@ class Executor:
             logger.warning("SOL price fetch failed, using cached: %s", exc)
         return self._sol_price_usd
 
+    async def get_token_decimals(self, mint: str) -> int:
+        """Token decimals from Jupiter price API — quote outDecimals is often missing."""
+        try:
+            data = await fetch_json(
+                self.session, "GET", JUPITER_PRICE_URL,
+                params={"ids": mint}, label=f"Jupiter decimals {mint[:8]}",
+            )
+            info = data.get(mint) or data.get("data", {}).get(mint) or {}
+            dec = info.get("decimals")
+            if dec is not None:
+                return int(dec)
+        except Exception:
+            pass
+        return 6
+
     async def get_token_price_usd(self, mint: str) -> float | None:
         import time
         now = time.time()
@@ -490,13 +505,18 @@ class Executor:
         try:
             quote = await self.get_quote(SOL_MINT, mint, lamports)
             out_amount = int(quote.get("outAmount", 0))
-            out_decimals = int(quote.get("outDecimals", 6) or 6)
+            quote_decimals = quote.get("outDecimals")
+            out_decimals = int(quote_decimals) if quote_decimals is not None else (
+                await self.get_token_decimals(mint)
+            )
             tokens_received = out_amount / (10**out_decimals)
 
-            token_price = await self.get_token_price_usd(mint)
-            if not token_price and tokens_received > 0:
-                sol_price = await self.get_sol_price_usd()
+            sol_price = await self.get_sol_price_usd()
+            # Cost-basis entry — avoids bogus Jupiter spot prices on new memes
+            if tokens_received > 0:
                 token_price = (amount_sol * sol_price) / tokens_received
+            else:
+                token_price = await self.get_token_price_usd(mint) or 0.0
 
             tx_sig = await self.execute_swap(quote)
 

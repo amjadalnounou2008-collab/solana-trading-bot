@@ -324,6 +324,26 @@ class RiskManager:
             return 1.0
         return current_price / position.entry_price_usd
 
+    def _cap_multiplier(self, mult: float) -> float:
+        """Paper/live sanity — meme price feeds can report nonsense multipliers."""
+        return max(0.0, min(mult, TP3_MULTIPLIER))
+
+    def _paper_exit_multiplier(self, position: Position, exit_reason: str) -> float:
+        """Realistic paper exit value from what monitoring tracked."""
+        peak = self._cap_multiplier(position.peak_multiplier)
+        last = self._cap_multiplier(
+            position.last_multiplier if position.last_multiplier > 0 else 1.0,
+        )
+        mult = min(last, peak)
+
+        if exit_reason == "SL":
+            return min(mult, 1.0 + STOP_LOSS_PCT / 100.0)
+        if exit_reason == "time_stop":
+            return min(mult, TIME_STOP_MIN_MULTIPLIER)
+        if exit_reason == "no_price_data":
+            return 0.0
+        return mult
+
     async def _paper_received_usd(
         self,
         position: Position,
@@ -331,15 +351,13 @@ class RiskManager:
         sell_pct: float,
         exit_reason: str = "",
     ) -> float:
-        """Paper PnL from tracked multipliers — sell-time quotes/prices lie on memes."""
+        """Paper partial sell — never trust Jupiter sell quotes."""
         spent = position.entry_cost_usd * (sell_pct / 100.0)
         if spent <= 0:
-            return max(0.0, quote_received)
+            return 0.0
 
-        # Use what monitoring saw while holding — never sell-time price spikes
-        exit_mult = position.last_multiplier if position.last_multiplier > 0 else 1.0
-        exit_mult = min(exit_mult, position.peak_multiplier * 1.02)
-        sanitized = max(0.0, spent * exit_mult)
+        exit_mult = self._paper_exit_multiplier(position, exit_reason)
+        sanitized = round(spent * exit_mult, 4)
 
         if quote_received > sanitized + 0.10 and quote_received > spent * 1.5:
             logger.warning(
@@ -348,7 +366,7 @@ class RiskManager:
                 quote_received, sanitized, position.symbol,
                 position.last_multiplier, position.peak_multiplier, exit_reason,
             )
-        return round(sanitized, 4)
+        return sanitized
 
     async def _sync_wallet_balance(self, position: Position) -> None:
         """Keep tracked balance in sync with what's actually in the wallet."""
@@ -448,9 +466,13 @@ class RiskManager:
         exit_time = datetime.now(timezone.utc)
         sol_price = await self.executor.get_sol_price_usd()
         spent_usd = position.entry_cost_usd or (position.initial_sol * sol_price)
-        received_usd = position.total_sol_received if SELL_TO_STABLE else (
-            position.total_sol_received * sol_price
-        )
+        if self.executor.paper_trade:
+            exit_mult = self._paper_exit_multiplier(position, exit_reason)
+            received_usd = round(spent_usd * exit_mult, 2)
+        else:
+            received_usd = position.total_sol_received if SELL_TO_STABLE else (
+                position.total_sol_received * sol_price
+            )
         pnl_usd = received_usd - spent_usd
         pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0.0
 
@@ -541,8 +563,10 @@ class RiskManager:
             return
         position.price_miss_count = 0
 
-        multiplier   = self._current_multiplier(position, current_price)
-        position.peak_multiplier = max(position.peak_multiplier, multiplier)
+        multiplier   = self._cap_multiplier(self._current_multiplier(position, current_price))
+        position.peak_multiplier = self._cap_multiplier(
+            max(position.peak_multiplier, multiplier),
+        )
         pnl_pct      = (multiplier - 1.0) * 100.0
         hold_minutes = (datetime.now(timezone.utc) - position.entry_time).total_seconds() / 60.0
 
