@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ logger = logging.getLogger("solana-bot.journal")
 
 LOG_FILE = Path("trade_log.jsonl")
 STATS_FILE = Path("trade_stats.json")
+RESET_TRADE_STATS = os.getenv("RESET_TRADE_STATS", "false").lower() in ("true", "1", "yes")
 
 
 @dataclass
@@ -40,6 +42,9 @@ class TradeStats:
 
     @classmethod
     def load(cls) -> "TradeStats":
+        if RESET_TRADE_STATS:
+            reset_trade_stats()
+            return cls()
         try:
             if STATS_FILE.exists():
                 d = json.loads(STATS_FILE.read_text())
@@ -47,6 +52,22 @@ class TradeStats:
         except Exception as exc:
             logger.warning("Could not load trade stats: %s", exc)
         return cls()
+
+
+def reset_trade_stats(clear_log: bool = False) -> None:
+    """Wipe inflated lifetime stats (one-time via RESET_TRADE_STATS=true)."""
+    try:
+        if STATS_FILE.exists():
+            STATS_FILE.unlink()
+        logger.info("Trade stats reset — lifetime PnL counters cleared")
+    except Exception as exc:
+        logger.warning("Could not delete trade_stats.json: %s", exc)
+    if clear_log and LOG_FILE.exists():
+        try:
+            LOG_FILE.unlink()
+            logger.info("Trade log cleared")
+        except Exception as exc:
+            logger.warning("Could not delete trade_log.jsonl: %s", exc)
 
 
 def log_event(event: str, **data: object) -> None:

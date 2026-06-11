@@ -3,8 +3,19 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
+from urllib.parse import unquote
 
 load_dotenv()
+
+
+def _env_token(key: str, default: str = "") -> str:
+    """Decode URL-encoded tokens pasted from browsers (%2B → +, %3D → =)."""
+    raw = os.getenv(key, default)
+    if not raw:
+        return raw
+    if "%" in raw:
+        return unquote(raw)
+    return raw
 
 
 @dataclass(frozen=True)
@@ -37,7 +48,7 @@ TRADER_BY_ADDRESS: dict[str, TraderConfig] = {t.address: t for t in TRADERS}
 WALLET_PRIVATE_KEY: str = os.getenv("WALLET_PRIVATE_KEY", "")
 HELIUS_API_KEY: str = os.getenv("HELIUS_API_KEY", "")
 BIRDEYE_API_KEY: str = os.getenv("BIRDEYE_API_KEY", "")
-TWITTER_BEARER_TOKEN: str = os.getenv("TWITTER_BEARER_TOKEN", "")
+TWITTER_BEARER_TOKEN: str = _env_token("TWITTER_BEARER_TOKEN")
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 PAPER_TRADE: bool = os.getenv("PAPER_TRADE", "true").lower() in ("true", "1", "yes")
@@ -155,6 +166,9 @@ def _parse_twitter_callers(raw: str) -> list[str]:
     return [h.strip().lstrip("@") for h in raw.split(",") if h.strip()]
 
 TWITTER_CALLERS: list[str] = _parse_twitter_callers(os.getenv("TWITTER_CALLERS", ""))
+
+# One-time: set RESET_TRADE_STATS=true, redeploy once, then remove or set false
+RESET_TRADE_STATS = os.getenv("RESET_TRADE_STATS", "false").lower() in ("true", "1", "yes")
 
 # General
 MAX_RETRIES = 3
