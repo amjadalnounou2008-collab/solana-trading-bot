@@ -17,6 +17,7 @@ from config import (
     DEXSCREENER_TOKEN_URL,
     DEXSCREENER_TOP_BOOSTS_URL,
     DEXTOOLS_API_KEY,
+    ENABLE_GMGN,
     MEME_COUNCIL_MIN,
     RUGCHECK_URL,
     SCAN_GRADUATED_ONLY,
@@ -539,6 +540,8 @@ class CoinScanner:
 
     async def _fetch_gmgn_trending(self) -> list[str]:
         """Fetch trending tokens from GMGN ranked by 1h swap volume."""
+        if not ENABLE_GMGN:
+            return []
         try:
             params = {
                 "limit": "20",
@@ -561,6 +564,8 @@ class CoinScanner:
 
     async def _fetch_gmgn_signals(self) -> list[str]:
         """Fetch smart money buy signals from GMGN."""
+        if not ENABLE_GMGN:
+            return []
         try:
             data = await fetch_json(
                 self.session, "GET", GMGN_SIGNALS_URL,
@@ -809,12 +814,15 @@ class CoinScanner:
                 if mint and not self._already_processed(mint) and mint not in candidates:
                     candidates.append(mint)
 
-        if candidates or gmgn_trending or gmgn_signals:
+        if candidates or (ENABLE_GMGN and (gmgn_trending or gmgn_signals)):
+            gmgn_part = (
+                f" | GMGN trending={len(gmgn_trending)} signals={len(gmgn_signals)}"
+                if ENABLE_GMGN else ""
+            )
             logger.info(
-                "Scanner cycle — %d candidates (dex=%d dextools=%d axiom=%d) | "
-                "GMGN trending=%d signals=%d",
+                "Scanner cycle — %d candidates (dex=%d dextools=%d axiom=%d)%s",
                 len(candidates), len(profiles) + len(boosts) + len(birdeye),
-                len(dextools), len(axiom), len(gmgn_trending), len(gmgn_signals),
+                len(dextools), len(axiom), gmgn_part,
             )
 
         for mint in candidates[:20]:
@@ -823,24 +831,27 @@ class CoinScanner:
             except Exception as exc:
                 logger.error("Error evaluating %s: %s", mint[:8], exc)
 
-        for mint in gmgn_signals[:10]:
-            try:
-                await self._evaluate_gmgn_token(mint, "signals")
-            except Exception as exc:
-                logger.error("Error evaluating GMGN signal %s: %s", mint[:8], exc)
+        if ENABLE_GMGN:
+            for mint in gmgn_signals[:10]:
+                try:
+                    await self._evaluate_gmgn_token(mint, "signals")
+                except Exception as exc:
+                    logger.error("Error evaluating GMGN signal %s: %s", mint[:8], exc)
 
-        for mint in gmgn_trending[:10]:
-            try:
-                await self._evaluate_gmgn_token(mint, "trending")
-            except Exception as exc:
-                logger.error("Error evaluating GMGN trending %s: %s", mint[:8], exc)
+            for mint in gmgn_trending[:10]:
+                try:
+                    await self._evaluate_gmgn_token(mint, "trending")
+                except Exception as exc:
+                    logger.error("Error evaluating GMGN trending %s: %s", mint[:8], exc)
 
         await self._run_pumpfun_cycle()
 
     async def run(self) -> None:
         self._running = True
         logger.info(
-            "Market scanner started — DexScreener + Birdeye + GMGN"
+            "Market scanner started — DexScreener"
+            + (" + Birdeye" if BIRDEYE_API_KEY and not BIRDEYE_API_KEY.startswith("your_") else "")
+            + (" + GMGN" if ENABLE_GMGN else "")
             + (" + Pump.fun" if SCAN_PUMPFUN_ENABLED else "")
             + (" + DexTools" if DEXTOOLS_API_KEY else "")
             + (" + Axiom" if AXIOM_AUTH_TOKEN else "")

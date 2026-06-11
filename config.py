@@ -113,6 +113,9 @@ SCAN_GRADUATED_ONLY    = True     # Raydium/Orca/Meteora/PumpSwap — sellable
 SCAN_REQUIRE_SELL_TEST = True     # verify Jupiter sell route BEFORE buying
 SCANNER_BUY_SOL        = MAX_BUY_SOL
 
+# GMGN scanner feeds — blocked on Railway (403); off by default
+ENABLE_GMGN = os.getenv("ENABLE_GMGN", "false").lower() in ("true", "1", "yes")
+
 # Pump.fun discovery (frontend-api-v3.pump.fun — free, no key required)
 SCAN_PUMPFUN_ENABLED         = os.getenv("SCAN_PUMPFUN_ENABLED", "true").lower() in ("true", "1", "yes")
 SCAN_PUMPFUN_LIVE            = True   # currently-live feed

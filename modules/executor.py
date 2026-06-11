@@ -286,7 +286,9 @@ class Executor:
             result = await self._price_from_dexscreener(mint)
 
         if not result:
-            result = await self._price_from_gmgn(mint)
+            from config import ENABLE_GMGN
+            if ENABLE_GMGN:
+                result = await self._price_from_gmgn(mint)
 
         self._token_price_cache[mint] = (now, result)
         return result
