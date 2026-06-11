@@ -174,6 +174,8 @@ TWITTER_CALLERS: list[str] = _parse_twitter_callers(os.getenv("TWITTER_CALLERS",
 
 # One-time: set RESET_TRADE_STATS=true, redeploy once, then remove or set false
 RESET_TRADE_STATS = os.getenv("RESET_TRADE_STATS", "false").lower() in ("true", "1", "yes")
+# One-time: set RESET_DAILY_BUYS=true, redeploy once, then remove or set false
+RESET_DAILY_BUYS = os.getenv("RESET_DAILY_BUYS", "false").lower() in ("true", "1", "yes")
 
 # General
 MAX_RETRIES = 3

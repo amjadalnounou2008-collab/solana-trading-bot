@@ -16,6 +16,7 @@ from config import (
     MAX_BUYS_PER_DAY,
     MAX_HOLD_MINUTES,
     MAX_OPEN_POSITIONS,
+    RESET_DAILY_BUYS,
     RISK_POLL_INTERVAL_SECONDS,
     SELL_TO_STABLE,
     STOP_LOSS_PCT,
@@ -327,6 +328,18 @@ class RiskManager:
             )
         else:
             self._reset_daily_if_needed()
+
+        if RESET_DAILY_BUYS:
+            self._reset_daily_if_needed()
+            self._buys_today = 0
+            self._daily_pnl_usd = 0.0
+            self._halted_today = False
+            self._halt_reason = ""
+            await self._save_bot_state()
+            logger.info(
+                "RESET_DAILY_BUYS — counter cleared (0/%d buys today, fresh paper session)",
+                MAX_BUYS_PER_DAY,
+            )
 
         if self._loss_cooldown:
             logger.info("Restored %d loss cooldown(s)", len(self._loss_cooldown))
