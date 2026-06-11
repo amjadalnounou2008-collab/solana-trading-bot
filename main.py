@@ -32,7 +32,7 @@ async def main() -> None:
     logger.info("=" * 60)
 
     if not config.HELIUS_API_KEY or config.HELIUS_API_KEY.startswith("your_"):
-        logger.warning("HELIUS_API_KEY not set — wallet tracking will fail")
+        logger.info("HELIUS_API_KEY not set — copy polling uses free public RPC")
     birdeye = "ON" if config.BIRDEYE_API_KEY and not config.BIRDEYE_API_KEY.startswith("your_") else "OFF"
     logger.info("Birdeye scanner data: %s", birdeye)
 

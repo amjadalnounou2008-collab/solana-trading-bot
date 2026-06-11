@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -14,16 +15,17 @@ from config import (
     COPY_MIN_TRADER_SOL,
     COPY_SKIP_IF_HOLDING,
     DEXSCREENER_TOKEN_URL,
-    HELIUS_API_KEY,
-    HELIUS_TX_URL,
     RUGCHECK_URL,
     CASH_MINT,
     SELL_SLIPPAGE_BPS,
     SOL_MINT,
+    SOLANA_SEND_RPC_URL,
     TRADER_BY_ADDRESS,
     TRADERS,
     USDC_MINT,
     WALLET_POLL_INTERVAL_SECONDS,
+    WALLET_RPC_BACKOFF_SECONDS,
+    WALLET_SIGNATURE_LIMIT,
 )
 from modules.utils import fetch_json, lamports_to_sol, sol_to_lamports
 
@@ -42,30 +44,120 @@ class WalletTracker:
         self._last_signatures: dict[str, str] = {}
         self._seen_signatures: dict[str, set[str]] = {t.address: set() for t in TRADERS}
         self._running = False
+        self._trader_index = 0
+        self._last_rpc_warn_at = 0.0
 
-    async def _fetch_transactions(self, address: str) -> list[dict[str, Any]] | None:
-        url = HELIUS_TX_URL.format(address=address)
-        params = {
-            "api-key": HELIUS_API_KEY,
-            "limit": 5,   # reduced from 10 to cut request weight
-            "type": "SWAP",
-        }
+    async def _rpc_call(self, method: str, params: list[Any]) -> Any:
+        body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        async with self.session.post(
+            SOLANA_SEND_RPC_URL,
+            json=body,
+            timeout=aiohttp.ClientTimeout(total=20),
+        ) as resp:
+            if resp.status == 429:
+                now = time.monotonic()
+                if now - self._last_rpc_warn_at >= 300:
+                    logger.warning(
+                        "RPC 429 — backing off %ds (copy polling slowed)",
+                        WALLET_RPC_BACKOFF_SECONDS,
+                    )
+                    self._last_rpc_warn_at = now
+                return None
+            data = await resp.json(content_type=None)
+        if data.get("error"):
+            raise RuntimeError(data["error"])
+        return data.get("result")
+
+    async def _list_signatures(self, address: str) -> list[str] | None:
         try:
-            async with self.session.get(
-                url, params=params, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status == 429:
-                    logger.warning("Helius 429 — backing off 30s")
-                    return None
-                if resp.status != 200:
-                    return []
-                data = await resp.json(content_type=None)
-            if isinstance(data, list):
-                return data
-            return data.get("data", data) if isinstance(data, dict) else []
+            result = await self._rpc_call(
+                "getSignaturesForAddress",
+                [address, {"limit": WALLET_SIGNATURE_LIMIT}],
+            )
+            if result is None:
+                return None
+            return [row["signature"] for row in result if row.get("signature")]
         except Exception as exc:
-            logger.warning("Helius fetch error %s: %s", address[:8], exc)
+            logger.warning("RPC signature fetch error %s: %s", address[:8], exc)
             return []
+
+    async def _get_transaction(self, signature: str) -> dict[str, Any] | None:
+        try:
+            result = await self._rpc_call(
+                "getTransaction",
+                [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            )
+            return result
+        except Exception as exc:
+            logger.warning("RPC tx fetch failed %s: %s", signature[:12], exc)
+            return None
+
+    def _account_pubkey(self, key: Any) -> str:
+        if isinstance(key, str):
+            return key
+        return str(key.get("pubkey", ""))
+
+    def _tx_to_helius_shape(
+        self, signature: str, tx: dict[str, Any], trader_address: str,
+    ) -> dict[str, Any] | None:
+        meta = tx.get("meta") or {}
+        if meta.get("err"):
+            return None
+
+        pre_token: dict[str, float] = {}
+        for bal in meta.get("preTokenBalances") or []:
+            if bal.get("owner") != trader_address:
+                continue
+            mint = bal.get("mint", "")
+            if mint in STABLE_MINTS:
+                continue
+            ui = bal.get("uiTokenAmount") or {}
+            pre_token[mint] = float(ui.get("uiAmount") or 0)
+
+        token_transfers: list[dict[str, Any]] = []
+        for bal in meta.get("postTokenBalances") or []:
+            if bal.get("owner") != trader_address:
+                continue
+            mint = bal.get("mint", "")
+            if mint in STABLE_MINTS:
+                continue
+            ui = bal.get("uiTokenAmount") or {}
+            post_amt = float(ui.get("uiAmount") or 0)
+            delta = post_amt - pre_token.get(mint, 0.0)
+            if delta <= 0:
+                continue
+            token_transfers.append({
+                "toUserAccount": trader_address,
+                "mint": mint,
+                "tokenAmount": delta,
+                "tokenSymbol": mint[:6],
+            })
+
+        if not token_transfers:
+            return None
+
+        native_transfers: list[dict[str, Any]] = []
+        message = tx.get("transaction", {}).get("message", {})
+        account_keys = message.get("accountKeys", [])
+        trader_idx = next(
+            (i for i, key in enumerate(account_keys) if self._account_pubkey(key) == trader_address),
+            None,
+        )
+        if trader_idx is not None:
+            pre_bal = meta.get("preBalances", [])[trader_idx]
+            post_bal = meta.get("postBalances", [])[trader_idx]
+            if post_bal < pre_bal:
+                native_transfers.append({
+                    "fromUserAccount": trader_address,
+                    "amount": pre_bal - post_bal,
+                })
+
+        return {
+            "signature": signature,
+            "type": "SWAP",
+            "tokenTransfers": token_transfers,
+            "nativeTransfers": native_transfers,
+        }
 
     def _estimate_sol_spent(self, tx: dict[str, Any], trader_address: str) -> float:
         sol_spent = 0.0
@@ -92,10 +184,6 @@ class WalletTracker:
         return sol_spent
 
     def _detect_buy(self, tx: dict[str, Any], trader_address: str) -> tuple[str, str] | None:
-        if tx.get("type") not in ("SWAP", "UNKNOWN", None):
-            if tx.get("type") and "SWAP" not in str(tx.get("type", "")).upper():
-                pass
-
         received_tokens: list[tuple[str, float, str]] = []
 
         for transfer in tx.get("tokenTransfers", []):
@@ -116,7 +204,11 @@ class WalletTracker:
                     mint = output.get("mint", "")
                     if mint and mint not in STABLE_MINTS:
                         symbol = output.get("symbol") or mint[:6]
-                        received_tokens.append((mint, float(output.get("rawTokenAmount", {}).get("tokenAmount", 0) or 0), symbol))
+                        received_tokens.append((
+                            mint,
+                            float(output.get("rawTokenAmount", {}).get("tokenAmount", 0) or 0),
+                            symbol,
+                        ))
 
         if not received_tokens:
             return None
@@ -142,7 +234,6 @@ class WalletTracker:
         return float(pair.get("marketCap") or pair.get("fdv") or 0)
 
     async def _is_graduated(self, mint: str) -> bool:
-        """Token has graduated from pump.fun — trading on a real DEX with liquidity."""
         pair = await self._get_best_pair(mint)
         if not pair:
             return False
@@ -241,7 +332,6 @@ class WalletTracker:
             )
             return
 
-        # Verify we can sell to Phantom Cash or USDC before copying
         try:
             buy_quote = await self.executor.get_quote(
                 SOL_MINT, mint, sol_to_lamports(trader.copy_amount_sol),
@@ -280,39 +370,42 @@ class WalletTracker:
 
     async def _poll_wallet(self, trader_address: str) -> None:
         try:
-            transactions = await self._fetch_transactions(trader_address)
-            if transactions is None:  # 429 returned None
-                await asyncio.sleep(30)  # back off 30s on rate limit
+            signatures = await self._list_signatures(trader_address)
+            if signatures is None:
+                await asyncio.sleep(WALLET_RPC_BACKOFF_SECONDS)
                 return
-            if not transactions:
+            if not signatures:
                 return
 
-            newest_sig = transactions[0].get("signature", "")
+            newest_sig = signatures[0]
             last_known = self._last_signatures.get(trader_address)
 
             if last_known is None:
                 self._last_signatures[trader_address] = newest_sig
-                for tx in transactions:
-                    sig = tx.get("signature", "")
-                    if sig:
-                        self._seen_signatures[trader_address].add(sig)
+                self._seen_signatures[trader_address].update(signatures)
                 logger.info("Initialized wallet tracker for %s", trader_address[:8])
                 return
 
             if newest_sig == last_known:
                 return
 
-            new_txs = []
-            for tx in transactions:
-                sig = tx.get("signature", "")
+            new_sigs: list[str] = []
+            for sig in signatures:
                 if sig == last_known:
                     break
-                new_txs.append(tx)
+                new_sigs.append(sig)
 
             self._last_signatures[trader_address] = newest_sig
 
-            for tx in reversed(new_txs):
-                await self._process_transaction(trader_address, tx)
+            for sig in reversed(new_sigs):
+                raw_tx = await self._get_transaction(sig)
+                if not raw_tx:
+                    continue
+                shaped = self._tx_to_helius_shape(sig, raw_tx, trader_address)
+                if not shaped:
+                    continue
+                await self._process_transaction(trader_address, shaped)
+                await asyncio.sleep(0.3)
 
         except Exception as exc:
             logger.error("Error polling wallet %s: %s", trader_address[:8], exc)
@@ -321,20 +414,17 @@ class WalletTracker:
         self._running = True
         trader_names = ", ".join(f"{t.name}" for t in TRADERS)
         logger.info(
-            "Wallet tracker started — polling %d wallets every %ds (%s)",
+            "Wallet tracker started — public RPC, rotating %d wallets every %ds (%s)",
             len(TRADERS),
             WALLET_POLL_INTERVAL_SECONDS,
             trader_names,
         )
 
         while self._running:
-            for trader in TRADERS:
-                if not self._running:
-                    break
-                await self._poll_wallet(trader.address)
-                await asyncio.sleep(5.0)  # 8 wallets × 5s = 40s per cycle
-            # rest after full cycle — total ~70s between full sweeps
-            await asyncio.sleep(30.0)
+            trader = TRADERS[self._trader_index % len(TRADERS)]
+            self._trader_index += 1
+            await self._poll_wallet(trader.address)
+            await asyncio.sleep(WALLET_POLL_INTERVAL_SECONDS)
 
     def stop(self) -> None:
         self._running = False

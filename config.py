@@ -125,8 +125,10 @@ SCAN_PUMPFUN_MAX_AGE_HOURS   = 6.0    # only fresh pump launches
 PUMP_INITIAL_VIRTUAL_SOL     = 30.0   # pump.fun curve starts ~30 virtual SOL
 PUMP_BONDING_SOL_TARGET      = 85.0   # graduation threshold (~85 SOL)
 
-# Wallet tracker settings
-WALLET_POLL_INTERVAL_SECONDS = 20  # 8 wallets × 1s gap = ~28s per full cycle, stays under free tier
+# Wallet tracker — public Solana RPC (no Helius credits needed for copy polling)
+WALLET_POLL_INTERVAL_SECONDS = 25
+WALLET_RPC_BACKOFF_SECONDS = 15
+WALLET_SIGNATURE_LIMIT = 8
 
 # Risk manager settings
 RISK_POLL_INTERVAL_SECONDS = 5

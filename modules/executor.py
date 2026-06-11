@@ -131,7 +131,7 @@ class Executor:
             "method": "getBalance",
             "params": [str(self.keypair.pubkey())],
         }
-        for rpc in (HELIUS_RPC_URL, SOLANA_SEND_RPC_URL):
+        for rpc in (SOLANA_SEND_RPC_URL, HELIUS_RPC_URL):
             try:
                 async with self.session.post(rpc, json=body) as resp:
                     data = await resp.json()
@@ -695,7 +695,7 @@ class Executor:
         if self.paper_trade or not self.keypair:
             return 0.0, 6
 
-        for rpc_url in (HELIUS_RPC_URL, SOLANA_SEND_RPC_URL):
+        for rpc_url in (SOLANA_SEND_RPC_URL, HELIUS_RPC_URL):
             payload = {
                 "jsonrpc": "2.0", "id": 1,
                 "method": "getTokenAccountsByOwner",
