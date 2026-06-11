@@ -31,6 +31,7 @@ from config import (
     TRAILING_STOP_PCT,
 )
 from modules.alerter import Alerter, TradeAlert
+from modules.bot_state import BotStateStore
 from modules.trade_journal import TradeStats, log_event
 from modules.utils import format_duration
 
@@ -234,9 +235,11 @@ class RiskManager:
         self.executor = executor
         self.alerter  = alerter
         self.store    = PositionStore()
+        self.state_store = BotStateStore()
         self.positions: dict[str, Position] = {}
         self._running = False
-        self._loss_cooldown: dict[str, datetime] = {}  # mint → don't rebuy until expired
+        self._loss_cooldown: dict[str, datetime] = {}
+        self._traded_mints: list[dict[str, Any]] = []
         self._trading_date: str = ""
         self._buys_today: int = 0
         self._daily_pnl_usd: float = 0.0
@@ -275,12 +278,61 @@ class RiskManager:
             return False
         if datetime.now(timezone.utc) >= until:
             del self._loss_cooldown[mint]
+            self._schedule_state_save()
             return False
         return True
 
+    def prior_loss_count(self, mint: str) -> int:
+        return sum(
+            1 for t in self._traded_mints
+            if t.get("mint") == mint and float(t.get("pnl_usd", 0)) < 0
+        )
+
+    async def _schedule_state_save(self) -> None:
+        await self._save_bot_state()
+
+    async def _save_bot_state(self) -> None:
+        await self.state_store.save({
+            "loss_cooldowns": BotStateStore.serialize_cooldowns(self._loss_cooldown),
+            "traded_mints": self._traded_mints,
+            "daily": {
+                "date": self._trading_date,
+                "buys_today": self._buys_today,
+                "daily_pnl_usd": self._daily_pnl_usd,
+                "halted_today": self._halted_today,
+                "halt_reason": self._halt_reason,
+            },
+        })
+
     async def initialize(self) -> None:
         await self.store.initialize()
+        await self.state_store.initialize()
         self.positions = await self.store.load_all()
+
+        raw = await self.state_store.load()
+        self._loss_cooldown = BotStateStore.parse_cooldowns(raw.get("loss_cooldowns", {}))
+        self._traded_mints = list(raw.get("traded_mints", []))
+
+        daily = raw.get("daily", {})
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if daily.get("date") == today:
+            self._trading_date = today
+            self._buys_today = int(daily.get("buys_today", 0))
+            self._daily_pnl_usd = float(daily.get("daily_pnl_usd", 0))
+            self._halted_today = bool(daily.get("halted_today", False))
+            self._halt_reason = str(daily.get("halt_reason", ""))
+            logger.info(
+                "Restored daily state — buys %d/%d | PnL $%.2f | halted=%s",
+                self._buys_today, MAX_BUYS_PER_DAY, self._daily_pnl_usd, self._halted_today,
+            )
+        else:
+            self._reset_daily_if_needed()
+
+        if self._loss_cooldown:
+            logger.info("Restored %d loss cooldown(s)", len(self._loss_cooldown))
+        if self.positions:
+            symbols = ", ".join(p.symbol for p in self.positions.values() if not p.closed)
+            logger.info("Still monitoring open position(s): %s", symbols)
 
     async def _persist(self, position: Position) -> None:
         if self.store._pool is not None:
@@ -313,6 +365,7 @@ class RiskManager:
         self._reset_daily_if_needed()
         self._buys_today += 1
         await self._persist(position)
+        await self._save_bot_state()
         log_event(
             "BUY", symbol=buy.symbol, mint=buy.mint,
             cost_usd=round(entry_cost_usd, 2), sol=buy.amount_sol,
@@ -556,6 +609,7 @@ class RiskManager:
                 f"Target: +${DAILY_PROFIT_TARGET_USD:.0f}\n"
                 f"No new buys until tomorrow. USDC stays in your wallet."
             )
+            await self._save_bot_state()
         elif self._daily_pnl_usd <= -DAILY_LOSS_LIMIT_USD and not self._halted_today:
             self._halted_today = True
             self._halt_reason = f"daily loss limit hit (-${DAILY_LOSS_LIMIT_USD:.0f})"
@@ -565,9 +619,19 @@ class RiskManager:
                 f"Limit: -${DAILY_LOSS_LIMIT_USD:.0f}\n"
                 f"No new buys until tomorrow."
             )
+            await self._save_bot_state()
 
         if pnl_usd < 0:
             self._loss_cooldown[position.mint] = exit_time + timedelta(hours=COPY_REBUY_COOLDOWN_HOURS)
+
+        self._traded_mints = BotStateStore.append_trade(
+            self._traded_mints,
+            mint=position.mint,
+            symbol=position.symbol,
+            pnl_usd=pnl_usd,
+            exit_reason=exit_reason,
+        )
+        await self._save_bot_state()
 
         hold_time = (exit_time - position.entry_time).total_seconds()
         logger.info("Position closed — %s | %s | hold %s | PnL %.4f SOL | peak %.2fx",

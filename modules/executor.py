@@ -399,7 +399,10 @@ class Executor:
             "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # SPL Token
             "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   # Token-2022
             "ComputeBudget111111111111111111111111111111",     # Compute budget
-            "11111111111111111111111111111111",                # System Program (allowed only alongside Jupiter)
+            "11111111111111111111111111111111",                # System Program
+            # Pump.fun bonding curve + PumpSwap AMM (Jupiter routes through these)
+            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+            "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
         }
         _SYSTEM_PROGRAM = "11111111111111111111111111111111"
 
@@ -411,12 +414,15 @@ class Executor:
 
             non_jupiter = []
             has_jupiter = False
+            has_pump = False
             for ix in instructions:
                 prog = account_keys[ix.program_id_index]
                 if prog not in _JUPITER_PROGRAMS:
                     non_jupiter.append(prog)
                 if prog.startswith("JUP"):
                     has_jupiter = True
+                if prog in ("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"):
+                    has_pump = True
 
             # Block plain SOL transfer: System Program instruction with exactly
             # 2 account indices (from + to) = raw lamport send to another wallet
@@ -437,9 +443,9 @@ class Executor:
                     "Only Jupiter swap routes are allowed."
                 )
 
-            if not has_jupiter:
+            if not has_jupiter and not has_pump:
                 raise ValueError(
-                    f"GUARD BLOCKED — transaction contains no Jupiter instruction. "
+                    f"GUARD BLOCKED — transaction contains no Jupiter or Pump.fun swap. "
                     f"Programs seen: {account_keys}. Transaction refused."
                 )
 

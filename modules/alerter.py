@@ -11,10 +11,13 @@ from config import (
     DAILY_LOSS_LIMIT_USD,
     DAILY_PROFIT_TARGET_USD,
     MAX_BUYS_PER_DAY,
+    MEME_COUNCIL_MIN,
     PAPER_TRADE,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     TELEGRAM_SEND_URL,
+    USE_MEME_COUNCIL,
+    SCAN_PUMPFUN_ENABLED,
 )
 from modules.utils import format_duration, format_usd
 
@@ -148,6 +151,10 @@ class Alerter:
         lines.extend([
             f"• Max <b>{MAX_BUYS_PER_DAY} buys/day</b> | locks profit at "
             f"<b>+${DAILY_PROFIT_TARGET_USD:.0f}/day</b> | stops at <b>-${DAILY_LOSS_LIMIT_USD:.0f}</b>",
+            "• Positions + cooldowns survive restarts (PostgreSQL or bot_state.json)",
+            f"• Pump.fun scanner: <b>{'ON' if SCAN_PUMPFUN_ENABLED else 'OFF'}</b> (live + graduating + graduated)",
+            f"• Meme Council: <b>{'ON' if USE_MEME_COUNCIL else 'OFF'}</b>"
+            + (f" ({MEME_COUNCIL_MIN}/5 agents must agree)" if USE_MEME_COUNCIL else ""),
             "• Every buy + sell → Telegram + trade log",
             "• Sells → <b>USDC</b> with running PnL totals",
         ])

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 
 from config import (
+    AXIOM_AUTH_TOKEN,
     BIRDEYE_API_KEY,
     BIRDEYE_OVERVIEW_URL,
     BIRDEYE_TRENDING_URL,
@@ -15,6 +16,8 @@ from config import (
     DEXSCREENER_PROFILES_URL,
     DEXSCREENER_TOKEN_URL,
     DEXSCREENER_TOP_BOOSTS_URL,
+    DEXTOOLS_API_KEY,
+    MEME_COUNCIL_MIN,
     RUGCHECK_URL,
     SCAN_GRADUATED_ONLY,
     SCAN_INTERVAL_SECONDS,
@@ -23,18 +26,32 @@ from config import (
     SCAN_MIN_LIQUIDITY_USD,
     SCAN_MIN_MCAP_USD,
     SCAN_MIN_SCORE,
+    SCAN_PUMPFUN_BONDING_MIN_PCT,
+    SCAN_PUMPFUN_ALLOW_BONDING,
+    SCAN_PUMPFUN_ENABLED,
+    SCAN_PUMPFUN_GRADUATED,
+    SCAN_PUMPFUN_GRADUATING,
+    SCAN_PUMPFUN_LIVE,
+    SCAN_PUMPFUN_MAX_AGE_HOURS,
+    SCAN_PUMPFUN_MIN_USD_MCAP,
     SCAN_REQUIRE_SELL_TEST,
     SCANNER_BUY_SOL,
     SELL_SLIPPAGE_BPS,
     SOL_MINT,
     TWITTER_BEARER_TOKEN,
     TWITTER_SEARCH_URL,
+    USE_MEME_COUNCIL,
 )
-from modules.utils import clamp, fetch_json
+from modules.meme_council import TokenCandidate, evaluate as council_evaluate
+from modules import pumpfun
+from modules.utils import clamp, fetch_json, sol_to_lamports
 
 GMGN_TRENDING_URL = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h"
 GMGN_SIGNALS_URL  = "https://gmgn.ai/defi/quotation/v1/signals/sol"
 GMGN_TOKEN_URL    = "https://gmgn.ai/defi/quotation/v1/tokens/sol/{mint}"
+
+DEXTOOLS_HOT_URL = "https://api.dextools.io/v2/ranking/sol/hotpools"
+AXIOM_TRENDING_URL = "https://api3.axiom.trade/new-trending-v2"
 
 GMGN_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -119,9 +136,25 @@ class CoinScanner:
             return []
 
     def _is_graduated(self, pair: dict[str, Any]) -> bool:
+        pump = pair.get("pumpfun") or {}
+        if pump.get("complete"):
+            return True
         dex = (pair.get("dexId") or "").lower()
         liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
         return dex in GRADUATED_DEXES and liq >= SCAN_MIN_LIQUIDITY_USD
+
+    def _pumpfun_bonding_ok(self, pair: dict[str, Any]) -> bool:
+        if not SCAN_PUMPFUN_ALLOW_BONDING:
+            return False
+        pump = pair.get("pumpfun") or {}
+        if pump.get("complete"):
+            return False
+        progress = float(pump.get("bonding_progress", 0) or 0)
+        mcap = float(pair.get("marketCap") or pair.get("fdv") or 0)
+        return (
+            progress >= SCAN_PUMPFUN_BONDING_MIN_PCT
+            and mcap >= SCAN_PUMPFUN_MIN_USD_MCAP * 0.5
+        )
 
     async def _verify_sell_route(self, mint: str, buy_quote: dict[str, Any]) -> bool:
         """Confirm Jupiter can sell this token — prevents honeypot/no-route bags."""
@@ -382,8 +415,8 @@ class CoinScanner:
             self._filter_rejected.add(mint)
             return
 
-        if SCAN_GRADUATED_ONLY and not self._is_graduated(pair):
-            logger.info("Scanner skip %s — not graduated (dex=%s, need Raydium/Orca)",
+        if SCAN_GRADUATED_ONLY and not self._is_graduated(pair) and not self._pumpfun_bonding_ok(pair):
+            logger.info("Scanner skip %s — not graduated (dex=%s, need Raydium/Orca/PumpSwap or pump graduating)",
                         symbol, dex)
             self._filter_rejected.add(mint)
             return
@@ -420,29 +453,81 @@ class CoinScanner:
             self._scored_low.add(mint)
             return
 
-        from config import LAMPORTS_PER_SOL
-        from modules.utils import sol_to_lamports
+        await self._attempt_buy(
+            mint=mint,
+            symbol=symbol,
+            pair=pair,
+            score=score,
+            breakdown=breakdown,
+            rugcheck_ok=rugcheck_ok,
+            rugcheck_score=rugcheck_score,
+            birdeye=birdeye,
+            twitter_mentions=twitter_mentions,
+            source="scanner",
+            reason_extra=f"mcap ${market_cap:,.0f} | liq ${liquidity_usd:,.0f} | {dex}",
+        )
 
+    async def _attempt_buy(
+        self,
+        *,
+        mint: str,
+        symbol: str,
+        pair: dict[str, Any],
+        score: float,
+        breakdown: dict[str, Any],
+        rugcheck_ok: bool,
+        rugcheck_score: float,
+        birdeye: dict[str, Any],
+        twitter_mentions: int,
+        source: str,
+        reason_extra: str,
+        score_threshold: float | None = None,
+    ) -> None:
         can_buy, skip = await self.executor.can_trade(mint)
         if not can_buy:
-            logger.info("Scanner skip %s (score %.0f) — %s", symbol, score, skip)
+            logger.info("%s skip %s (score %.0f) — %s", source, symbol, score, skip)
             return
 
         buy_quote = await self.executor.get_quote(
             SOL_MINT, mint, sol_to_lamports(SCANNER_BUY_SOL),
         )
-        if not await self._verify_sell_route(mint, buy_quote):
+        sell_ok = await self._verify_sell_route(mint, buy_quote)
+        if not sell_ok:
             logger.info(
-                "Scanner skip %s (score %.0f) — cannot sell on Jupiter (honeypot/no route)",
-                symbol, score,
+                "%s skip %s (score %.0f) — cannot sell on Jupiter (honeypot/no route)",
+                source, symbol, score,
             )
             return
 
-        reason = (
-            f"Scanner discovery — score {score:.0f}/100 | "
-            f"mcap ${market_cap:,.0f} | liq ${liquidity_usd:,.0f} | {dex}"
+        rm = self.executor.risk_manager
+        candidate = TokenCandidate(
+            mint=mint,
+            symbol=symbol,
+            pair=pair,
+            rugcheck_ok=rugcheck_ok,
+            rugcheck_score=rugcheck_score,
+            birdeye=birdeye,
+            twitter_mentions=twitter_mentions,
+            score=score,
+            breakdown=breakdown,
+            source=source,
+            sell_route_ok=sell_ok,
+            on_loss_cooldown=rm.on_cooldown(mint) if rm else False,
+            prior_losses=rm.prior_loss_count(mint) if rm else 0,
         )
-        logger.info("BUY signal — %s scored %.0f (sell route verified)", symbol, score)
+
+        if USE_MEME_COUNCIL:
+            council = council_evaluate(candidate, MEME_COUNCIL_MIN)
+            if not council.approved:
+                logger.info(
+                    "%s skip %s — Meme Council %s rejected",
+                    source, symbol, council.score,
+                )
+                return
+            breakdown = {**breakdown, "council": council.score}
+
+        reason = f"{source} — score {score:.0f}/100 | {reason_extra}"
+        logger.info("BUY signal — %s scored %.0f (%s)", symbol, score, source)
         buy_sol = await self.executor.calc_buy_size_sol()
         await self.executor.buy_token(
             mint=mint,
@@ -519,17 +604,11 @@ class CoinScanner:
                 f"{float(pair.get('liquidity', {}).get('usd', 0) or 0):,.0f}",
             )
 
-            threshold = SCAN_MIN_SCORE - 5  # slightly lower threshold for GMGN (57)
+            threshold = SCAN_MIN_SCORE - 5
             if boosted_score < threshold:
                 self._scored_low.add(mint)
                 return
 
-            can_buy, skip = await self.executor.can_trade(mint)
-            if not can_buy:
-                logger.info("GMGN skip %s — %s", symbol, skip)
-                return
-
-            # Verify Jupiter can price this token before buying
             jupiter_price = await self.executor.get_token_price_usd(mint)
             if not jupiter_price or jupiter_price <= 0:
                 logger.info(
@@ -538,18 +617,181 @@ class CoinScanner:
                 )
                 return
 
-            reason = f"GMGN {source} — score {boosted_score}/100 (raw {score}, threshold {threshold})"
-            logger.info("BUY signal from GMGN [%s] — %s scored %d", source, symbol, boosted_score)
-            buy_sol = await self.executor.calc_buy_size_sol()
-            await self.executor.buy_token(
+            liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+            await self._attempt_buy(
                 mint=mint,
-                amount_sol=buy_sol,
-                reason=reason,
                 symbol=symbol,
-                score_breakdown=breakdown,
+                pair=pair,
+                score=boosted_score,
+                breakdown=breakdown,
+                rugcheck_ok=rugcheck_ok,
+                rugcheck_score=rugcheck_score,
+                birdeye=birdeye,
+                twitter_mentions=twitter_mentions,
+                source=f"GMGN {source}",
+                reason_extra=f"raw {score:.0f} | liq ${liq:,.0f}",
             )
         except Exception as exc:
             logger.error("Error evaluating GMGN token %s: %s", mint[:8], exc)
+
+    async def _evaluate_pumpfun_coin(self, coin: dict[str, Any], source: str) -> None:
+        mint = coin.get("mint", "")
+        if not mint or self._already_processed(mint):
+            return
+
+        try:
+            symbol = coin.get("symbol", "UNKNOWN")
+            complete = bool(coin.get("complete"))
+            progress = pumpfun.bonding_progress(coin)
+            mcap = pumpfun.usd_market_cap(coin)
+            age = pumpfun.coin_age_hours(coin)
+
+            if age > SCAN_PUMPFUN_MAX_AGE_HOURS:
+                return
+            if mcap < SCAN_PUMPFUN_MIN_USD_MCAP * 0.5:
+                return
+            if not complete and progress < SCAN_PUMPFUN_BONDING_MIN_PCT:
+                return
+
+            pair = await self._fetch_pair_data(mint)
+            if pair:
+                pair.setdefault("pumpfun", {})
+                pair["pumpfun"].update({
+                    "complete": complete,
+                    "bonding_progress": progress,
+                    "source": source,
+                })
+            else:
+                pair = pumpfun.synthetic_pair_from_coin(coin)
+
+            if coin.get("nsfw"):
+                self._filter_rejected.add(mint)
+                return
+
+            rugcheck_ok, rugcheck_score = await self._rugcheck_score(mint)
+            if not rugcheck_ok:
+                logger.info("Pump.fun skip %s — RugCheck flagged", symbol)
+                self._filter_rejected.add(mint)
+                return
+
+            birdeye = await self._birdeye_data(mint)
+            twitter_mentions = await self._twitter_mentions(symbol)
+            score, breakdown = self._score_token(
+                pair, rugcheck_ok, rugcheck_score, birdeye, twitter_mentions,
+            )
+
+            # Boost graduating pump tokens (Axiom Pulse "final stretch" style)
+            if not complete and progress >= SCAN_PUMPFUN_BONDING_MIN_PCT:
+                score = min(100.0, score + 8.0)
+                breakdown["pumpfun"] = f"+8 graduating ({progress:.0f}% curve)"
+            elif complete:
+                score = min(100.0, score + 5.0)
+                breakdown["pumpfun"] = "+5 freshly graduated"
+
+            logger.info(
+                "Pump.fun [%s] %s (%s) — score %.0f | %s | mcap $%s | curve %.0f%%",
+                source, symbol, mint[:8], score,
+                "graduated" if complete else "graduating",
+                f"{mcap:,.0f}", progress,
+            )
+
+            threshold = SCAN_MIN_SCORE - (3 if complete else 5)
+            if score < threshold:
+                self._scored_low.add(mint)
+                return
+
+            await self._attempt_buy(
+                mint=mint,
+                symbol=symbol,
+                pair=pair,
+                score=score,
+                breakdown=breakdown,
+                rugcheck_ok=rugcheck_ok,
+                rugcheck_score=rugcheck_score,
+                birdeye=birdeye,
+                twitter_mentions=twitter_mentions,
+                source=f"Pump.fun {source}",
+                reason_extra=(
+                    f"{'graduated' if complete else f'graduating {progress:.0f}%'} | "
+                    f"mcap ${mcap:,.0f}"
+                ),
+            )
+        except Exception as exc:
+            logger.error("Error evaluating Pump.fun %s: %s", mint[:8], exc)
+
+    async def _run_pumpfun_cycle(self) -> None:
+        if not SCAN_PUMPFUN_ENABLED:
+            return
+
+        tasks: list[tuple[str, list[dict[str, Any]]]] = []
+        if SCAN_PUMPFUN_LIVE:
+            live = await pumpfun.fetch_live(self.session)
+            tasks.append(("live", live))
+        if SCAN_PUMPFUN_GRADUATING:
+            graduating = await pumpfun.fetch_graduating(self.session)
+            tasks.append(("graduating", graduating))
+        if SCAN_PUMPFUN_GRADUATED:
+            graduated = await pumpfun.fetch_graduated_recent(self.session)
+            tasks.append(("graduated", graduated))
+
+        for label, coins in tasks:
+            for coin in coins[:12]:
+                try:
+                    await self._evaluate_pumpfun_coin(coin, label)
+                except Exception as exc:
+                    mint = coin.get("mint", "")[:8]
+                    logger.error("Pump.fun cycle error %s: %s", mint, exc)
+
+    async def _fetch_dextools_hot(self) -> list[str]:
+        if not DEXTOOLS_API_KEY or DEXTOOLS_API_KEY.startswith("your_"):
+            return []
+        try:
+            headers = {"X-API-KEY": DEXTOOLS_API_KEY, "Accept": "application/json"}
+            data = await fetch_json(
+                self.session, "GET", DEXTOOLS_HOT_URL,
+                headers=headers, label="DexTools hot",
+            )
+            results = data.get("data", {}).get("results", []) or data.get("results", []) or []
+            mints = []
+            for item in results[:20]:
+                token = item.get("token") or item.get("mainToken") or {}
+                addr = token.get("address") or item.get("address") or ""
+                if addr:
+                    mints.append(addr)
+            if mints:
+                logger.info("DexTools hot pools: %d token(s)", len(mints))
+            return mints
+        except Exception as exc:
+            logger.warning("DexTools fetch failed: %s", exc)
+            return []
+
+    async def _fetch_axiom_trending(self) -> list[str]:
+        if not AXIOM_AUTH_TOKEN or AXIOM_AUTH_TOKEN.startswith("your_"):
+            return []
+        try:
+            headers = {
+                "Accept": "application/json",
+                "Cookie": f"auth-token={AXIOM_AUTH_TOKEN}",
+                "User-Agent": GMGN_HEADERS["User-Agent"],
+                "Referer": "https://axiom.trade/",
+            }
+            data = await fetch_json(
+                self.session, "GET", AXIOM_TRENDING_URL,
+                params={"timePeriod": "1h"},
+                headers=headers, label="Axiom trending",
+            )
+            tokens = data if isinstance(data, list) else data.get("tokens", []) or data.get("data", []) or []
+            mints = []
+            for t in tokens[:20]:
+                addr = t.get("tokenAddress") or t.get("mint") or t.get("address") or ""
+                if addr:
+                    mints.append(addr)
+            if mints:
+                logger.info("Axiom trending: %d token(s)", len(mints))
+            return mints
+        except Exception as exc:
+            logger.warning("Axiom trending fetch failed: %s", exc)
+            return []
 
     async def _scan_cycle(self) -> None:
         candidates: list[str] = []
@@ -559,18 +801,20 @@ class CoinScanner:
         birdeye = await self._fetch_birdeye_trending()
         gmgn_trending = await self._fetch_gmgn_trending()
         gmgn_signals = await self._fetch_gmgn_signals()
+        dextools = await self._fetch_dextools_hot()
+        axiom = await self._fetch_axiom_trending()
 
-        for source_mints in (profiles, boosts, birdeye):
+        for source_mints in (profiles, boosts, birdeye, dextools, axiom):
             for mint in source_mints:
                 if mint and not self._already_processed(mint) and mint not in candidates:
                     candidates.append(mint)
 
         if candidates or gmgn_trending or gmgn_signals:
             logger.info(
-                "Scanner cycle — %d dex candidates (profiles=%d boosts=%d birdeye=%d) | "
+                "Scanner cycle — %d candidates (dex=%d dextools=%d axiom=%d) | "
                 "GMGN trending=%d signals=%d",
-                len(candidates), len(profiles), len(boosts), len(birdeye),
-                len(gmgn_trending), len(gmgn_signals),
+                len(candidates), len(profiles) + len(boosts) + len(birdeye),
+                len(dextools), len(axiom), len(gmgn_trending), len(gmgn_signals),
             )
 
         for mint in candidates[:20]:
@@ -591,12 +835,17 @@ class CoinScanner:
             except Exception as exc:
                 logger.error("Error evaluating GMGN trending %s: %s", mint[:8], exc)
 
+        await self._run_pumpfun_cycle()
+
     async def run(self) -> None:
         self._running = True
         logger.info(
-            "Market scanner started — DexScreener + Birdeye + GMGN every %ds | "
-            "graduated only | min score %d | buy %.3f SOL",
-            SCAN_INTERVAL_SECONDS, SCAN_MIN_SCORE, SCANNER_BUY_SOL,
+            "Market scanner started — DexScreener + Birdeye + GMGN"
+            + (" + Pump.fun" if SCAN_PUMPFUN_ENABLED else "")
+            + (" + DexTools" if DEXTOOLS_API_KEY else "")
+            + (" + Axiom" if AXIOM_AUTH_TOKEN else "")
+            + f" every {SCAN_INTERVAL_SECONDS}s | council {'ON' if USE_MEME_COUNCIL else 'OFF'}"
+            f" ({MEME_COUNCIL_MIN}/5) | min score {SCAN_MIN_SCORE}",
         )
 
         while self._running:

@@ -95,9 +95,21 @@ SCAN_MIN_LIQUIDITY_USD = 15_000   # graduated pool minimum
 SCAN_MIN_MCAP_USD      = 25_000   # skip micro-dead coins
 SCAN_MAX_MCAP_USD      = 600_000  # memecoin sweet spot
 SCAN_MIN_AGE_HOURS     = 0.5      # at least 30 min old
-SCAN_GRADUATED_ONLY    = True     # Raydium/Orca/Meteora only — sellable
+SCAN_GRADUATED_ONLY    = True     # Raydium/Orca/Meteora/PumpSwap — sellable
 SCAN_REQUIRE_SELL_TEST = True     # verify Jupiter sell route BEFORE buying
 SCANNER_BUY_SOL        = MAX_BUY_SOL
+
+# Pump.fun discovery (frontend-api-v3.pump.fun — free, no key required)
+SCAN_PUMPFUN_ENABLED         = os.getenv("SCAN_PUMPFUN_ENABLED", "true").lower() in ("true", "1", "yes")
+SCAN_PUMPFUN_LIVE            = True   # currently-live feed
+SCAN_PUMPFUN_GRADUATING      = True   # bonding curve near completion (70%+)
+SCAN_PUMPFUN_GRADUATED       = True   # recently graduated to PumpSwap
+SCAN_PUMPFUN_ALLOW_BONDING   = True   # allow buys on bonding curve if Jupiter can sell
+SCAN_PUMPFUN_BONDING_MIN_PCT = float(os.getenv("SCAN_PUMPFUN_BONDING_MIN_PCT", "70"))
+SCAN_PUMPFUN_MIN_USD_MCAP    = 8_000   # min ~$8k on pump curve
+SCAN_PUMPFUN_MAX_AGE_HOURS   = 6.0    # only fresh pump launches
+PUMP_INITIAL_VIRTUAL_SOL     = 30.0   # pump.fun curve starts ~30 virtual SOL
+PUMP_BONDING_SOL_TARGET      = 85.0   # graduation threshold (~85 SOL)
 
 # Wallet tracker settings
 WALLET_POLL_INTERVAL_SECONDS = 20  # 8 wallets × 1s gap = ~28s per full cycle, stays under free tier
@@ -116,6 +128,14 @@ TRAILING_ACTIVATION_MULTIPLIER = 3.0
 TIME_STOP_MINUTES = 15        # flat for 15 min → sell
 TIME_STOP_MIN_MULTIPLIER = 1.1  # needs 1.1x in 15 min or exit
 MAX_HOLD_MINUTES = 45         # never hold longer than 45 min — force sell
+
+# Meme Council — multi-agent buy gate (rule-based, no LLM)
+USE_MEME_COUNCIL = os.getenv("USE_MEME_COUNCIL", "true").lower() in ("true", "1", "yes")
+MEME_COUNCIL_MIN = int(os.getenv("MEME_COUNCIL_MIN", "4"))  # 4/5 agents must approve
+
+# Optional extra scan feeds (leave blank to skip)
+DEXTOOLS_API_KEY: str = os.getenv("DEXTOOLS_API_KEY", "")
+AXIOM_AUTH_TOKEN: str = os.getenv("AXIOM_AUTH_TOKEN", "")
 
 # General
 MAX_RETRIES = 3
