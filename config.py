@@ -51,7 +51,7 @@ BIRDEYE_API_KEY: str = os.getenv("BIRDEYE_API_KEY", "")
 TWITTER_BEARER_TOKEN: str = _env_token("TWITTER_BEARER_TOKEN")
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
-PAPER_TRADE: bool = os.getenv("PAPER_TRADE", "true").lower() in ("true", "1", "yes")
+PAPER_TRADE: bool = True  # paper mode — no real buys/sells
 
 # Solana constants
 SOL_MINT = "So11111111111111111111111111111111111111112"
