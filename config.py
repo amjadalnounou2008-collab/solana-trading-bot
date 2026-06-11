@@ -149,11 +149,9 @@ TWITTER_STATS_DAYS = int(os.getenv("TWITTER_STATS_DAYS", "30"))
 TWITTER_STATS_INTERVAL_HOURS = int(os.getenv("TWITTER_STATS_INTERVAL_HOURS", "24"))
 
 def _parse_twitter_callers(raw: str) -> list[str]:
+    """Accounts to watch — set TWITTER_CALLERS on Railway (comma-separated @handles)."""
     if not raw.strip():
-        return [
-            "hawkssol", "SAmek787", "Pylu69", "Skibru", "Elon_x_007",
-            "blknoiz06", "ansem", "muststopmurad",
-        ]
+        return []
     return [h.strip().lstrip("@") for h in raw.split(",") if h.strip()]
 
 TWITTER_CALLERS: list[str] = _parse_twitter_callers(os.getenv("TWITTER_CALLERS", ""))

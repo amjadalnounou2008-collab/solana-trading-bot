@@ -156,7 +156,13 @@ class Alerter:
             "• Positions + cooldowns survive restarts (PostgreSQL or bot_state.json)",
             f"• Pump.fun scanner: <b>{'ON' if SCAN_PUMPFUN_ENABLED else 'OFF'}</b> (live + graduating + graduated)",
             f"• Twitter caller tracker: <b>{'ON' if TWITTER_TRACKER_ENABLED else 'OFF'}</b>"
-            + (f" ({len(TWITTER_CALLERS)} accounts)" if TWITTER_TRACKER_ENABLED else ""),
+            + (
+                f" ({len(TWITTER_CALLERS)} accounts + keyword search)"
+                if TWITTER_CALLERS
+                else " (keyword search — add TWITTER_CALLERS to watch specific accounts)"
+                if TWITTER_TRACKER_ENABLED
+                else ""
+            ),
             f"• Meme Council: <b>{'ON' if USE_MEME_COUNCIL else 'OFF'}</b>"
             + (f" ({MEME_COUNCIL_MIN}/5 agents must agree)" if USE_MEME_COUNCIL else ""),
             "• Every buy + sell → Telegram + trade log",

@@ -352,6 +352,8 @@ class TwitterTracker:
         )
 
     async def _poll_callers(self) -> None:
+        if not TWITTER_CALLERS:
+            return
         for raw in TWITTER_CALLERS:
             username = raw.strip().lstrip("@")
             if not username:
@@ -412,9 +414,15 @@ class TwitterTracker:
             return
 
         self._running = True
+        mode = []
+        if TWITTER_CALLERS:
+            mode.append(f"{len(TWITTER_CALLERS)} account(s)")
+        if TWITTER_KEYWORD_SEARCH:
+            mode.append("keyword search")
         logger.info(
-            "Twitter tracker started — %d caller(s), poll every %ds, search=%s",
-            len(TWITTER_CALLERS), TWITTER_POLL_SECONDS, TWITTER_KEYWORD_SEARCH,
+            "Twitter tracker started — %s, poll every %ds",
+            " + ".join(mode) or "no sources (add TWITTER_CALLERS on Railway)",
+            TWITTER_POLL_SECONDS,
         )
 
         while self._running:
