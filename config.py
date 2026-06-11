@@ -65,6 +65,9 @@ RUGCHECK_URL = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 BIRDEYE_OVERVIEW_URL = "https://public-api.birdeye.so/defi/token_overview"
 BIRDEYE_TRENDING_URL = "https://public-api.birdeye.so/defi/token_trending"
 TWITTER_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent"
+TWITTER_USER_LOOKUP_URL = "https://api.twitter.com/2/users/by/username/{username}"
+TWITTER_USER_TWEETS_URL = "https://api.twitter.com/2/users/{user_id}/tweets"
+DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 # Copy-trade filters (milkybids-style: graduated tokens from vetted wallets)
@@ -136,6 +139,24 @@ MEME_COUNCIL_MIN = int(os.getenv("MEME_COUNCIL_MIN", "4"))  # 4/5 agents must ap
 # Optional extra scan feeds (leave blank to skip)
 DEXTOOLS_API_KEY: str = os.getenv("DEXTOOLS_API_KEY", "")
 AXIOM_AUTH_TOKEN: str = os.getenv("AXIOM_AUTH_TOKEN", "")
+
+# Twitter / X caller tracker (alerts + hit-rate stats like alpha groups)
+TWITTER_TRACKER_ENABLED = os.getenv("ENABLE_TWITTER_TRACKER", "true").lower() in ("true", "1", "yes")
+TWITTER_POLL_SECONDS = int(os.getenv("TWITTER_POLL_SECONDS", "90"))
+TWITTER_KEYWORD_SEARCH = os.getenv("TWITTER_KEYWORD_SEARCH", "true").lower() in ("true", "1", "yes")
+TWITTER_AUTO_BUY = os.getenv("TWITTER_AUTO_BUY", "false").lower() in ("true", "1", "yes")
+TWITTER_STATS_DAYS = int(os.getenv("TWITTER_STATS_DAYS", "30"))
+TWITTER_STATS_INTERVAL_HOURS = int(os.getenv("TWITTER_STATS_INTERVAL_HOURS", "24"))
+
+def _parse_twitter_callers(raw: str) -> list[str]:
+    if not raw.strip():
+        return [
+            "hawkssol", "SAmek787", "Pylu69", "Skibru", "Elon_x_007",
+            "blknoiz06", "ansem", "muststopmurad",
+        ]
+    return [h.strip().lstrip("@") for h in raw.split(",") if h.strip()]
+
+TWITTER_CALLERS: list[str] = _parse_twitter_callers(os.getenv("TWITTER_CALLERS", ""))
 
 # General
 MAX_RETRIES = 3

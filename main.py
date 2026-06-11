@@ -13,6 +13,7 @@ from modules.executor import Executor
 from modules.risk_manager import RiskManager
 from modules.utils import setup_logging
 from modules.wallet_tracker import WalletTracker
+from modules.twitter_tracker import TwitterTracker
 
 logger = logging.getLogger("solana-bot")
 
@@ -35,6 +36,13 @@ async def main() -> None:
     birdeye = "ON" if config.BIRDEYE_API_KEY and not config.BIRDEYE_API_KEY.startswith("your_") else "OFF"
     logger.info("Birdeye scanner data: %s", birdeye)
 
+    twitter_on = config.TWITTER_TRACKER_ENABLED and config.TWITTER_BEARER_TOKEN
+    logger.info(
+        "Twitter tracker: %s (%d callers)",
+        "ON" if twitter_on else "OFF",
+        len(config.TWITTER_CALLERS) if twitter_on else 0,
+    )
+
     # Force Google DNS — Railway's default DNS can't resolve jup.ag domains
     connector = aiohttp.TCPConnector(
         resolver=aiohttp.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1"]),
@@ -52,6 +60,7 @@ async def main() -> None:
             WalletTracker(session, executor)
             if config.ENABLE_COPY_TRADING and config.TRADERS else None
         )
+        twitter_tracker = TwitterTracker(session, alerter, executor)
 
         await alerter.send_startup_message(
             lifetime_pnl=risk_manager.stats.lifetime_pnl_usd,
@@ -67,6 +76,7 @@ async def main() -> None:
             if wallet_tracker:
                 wallet_tracker.stop()
             coin_scanner.stop()
+            twitter_tracker.stop()
             risk_manager.stop()
 
         loop = asyncio.get_running_loop()
@@ -78,7 +88,7 @@ async def main() -> None:
 
         logger.info("All modules running concurrently via asyncio.gather()")
 
-        tasks = [coin_scanner.run(), risk_manager.run(), _run_until_shutdown()]
+        tasks = [coin_scanner.run(), risk_manager.run(), twitter_tracker.run(), _run_until_shutdown()]
         if wallet_tracker:
             tasks.insert(0, wallet_tracker.run())
 

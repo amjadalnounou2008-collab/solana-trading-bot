@@ -18,6 +18,8 @@ from config import (
     TELEGRAM_SEND_URL,
     USE_MEME_COUNCIL,
     SCAN_PUMPFUN_ENABLED,
+    TWITTER_CALLERS,
+    TWITTER_TRACKER_ENABLED,
 )
 from modules.utils import format_duration, format_usd
 
@@ -153,6 +155,8 @@ class Alerter:
             f"<b>+${DAILY_PROFIT_TARGET_USD:.0f}/day</b> | stops at <b>-${DAILY_LOSS_LIMIT_USD:.0f}</b>",
             "• Positions + cooldowns survive restarts (PostgreSQL or bot_state.json)",
             f"• Pump.fun scanner: <b>{'ON' if SCAN_PUMPFUN_ENABLED else 'OFF'}</b> (live + graduating + graduated)",
+            f"• Twitter caller tracker: <b>{'ON' if TWITTER_TRACKER_ENABLED else 'OFF'}</b>"
+            + (f" ({len(TWITTER_CALLERS)} accounts)" if TWITTER_TRACKER_ENABLED else ""),
             f"• Meme Council: <b>{'ON' if USE_MEME_COUNCIL else 'OFF'}</b>"
             + (f" ({MEME_COUNCIL_MIN}/5 agents must agree)" if USE_MEME_COUNCIL else ""),
             "• Every buy + sell → Telegram + trade log",
@@ -164,6 +168,73 @@ class Alerter:
                 f"• Tracked history: {lifetime_trades} trades, "
                 f"{sign}{format_usd(lifetime_pnl)} all-time"
             )
+        await self.send_message("\n".join(lines))
+
+    async def send_twitter_call_alert(
+        self,
+        *,
+        caller: str,
+        symbol: str,
+        mint: str,
+        mcap_usd: float,
+        liq_usd: float,
+        bonding_progress: float,
+        rugcheck_ok: bool,
+        rugcheck_score: float,
+        tweet_text: str,
+        tweet_id: str,
+    ) -> None:
+        rug_icon = "✅" if rugcheck_ok else "❌"
+        curve = (
+            f"Graduated ✅"
+            if bonding_progress >= 100
+            else f"Bonding curve {bonding_progress:.0f}%"
+        )
+        snippet = tweet_text.replace("\n", " ")[:160]
+        lines = [
+            f"<b>🐦 NEW CALL — @{caller}</b>",
+            f"<b>${symbol}</b> | mcap {format_usd(mcap_usd)} | liq {format_usd(liq_usd)}",
+            f"{curve} | RugCheck {rug_icon} (score {rugcheck_score:.0f})",
+            "",
+            f"<i>{snippet}</i>",
+            "",
+            f"<b>Mint:</b> <code>{mint}</code>",
+            f"<a href=\"https://pump.fun/coin/{mint}\">Pump.fun</a> · "
+            f"<a href=\"https://dexscreener.com/solana/{mint}\">DexScreener</a> · "
+            f"<a href=\"https://twitter.com/i/web/status/{tweet_id}\">Tweet</a>",
+        ]
+        await self.send_message("\n".join(lines))
+
+    async def send_caller_stats(
+        self,
+        summary: dict,
+        leaders: list,
+        top_calls: list,
+        days: int,
+    ) -> None:
+        lines = [
+            f"<b>📊 Caller stats — last {days} days</b>",
+            f"Calls: <b>{summary['calls']}</b> | "
+            f"Hit rate: <b>{summary['hit_rate_pct']:.0f}%</b> (2x+) | "
+            f"Median: <b>{summary['median_return_x']:.2f}x</b> | "
+            f"Avg: <b>{summary['avg_return_x']:.2f}x</b>",
+            "",
+            "<b>Top callers</b>",
+        ]
+        for i, s in enumerate(leaders[:3], 1):
+            lines.append(
+                f"{i}. @{s.caller} — {s.calls} calls | "
+                f"{s.hit_rate_pct:.0f}% hit | med {s.median_return_x:.2f}x | "
+                f"best ${s.best_symbol} {s.best_return_x:.2f}x"
+            )
+        if top_calls:
+            lines.append("")
+            lines.append("<b>Top 10 calls</b>")
+            for i, c in enumerate(top_calls[:10], 1):
+                lines.append(
+                    f"{i}. <b>${c.symbol}</b> @{c.caller} — "
+                    f"<b>{c.peak_multiplier:.2f}x</b> peak"
+                )
         await self.send_message("\n".join(lines))
 
     async def send_error(self, context: str, error: str) -> None:
