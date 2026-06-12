@@ -91,7 +91,9 @@ COPY_SKIP_IF_HOLDING = True         # don't buy same token twice
 COPY_REBUY_COOLDOWN_HOURS = 24     # after a losing exit, don't copy-buy same token again
 
 # Trade budget — stop overtrading (main cause of losses)
-MAX_BUYS_PER_DAY       = 3        # max new positions per day (copy + scanner combined)
+MAX_BUYS_PER_DAY_LIVE  = 3        # live trading cap
+MAX_BUYS_PER_DAY_PAPER = 10       # paper only — more samples for testing
+MAX_BUYS_PER_DAY       = MAX_BUYS_PER_DAY_PAPER if PAPER_TRADE else MAX_BUYS_PER_DAY_LIVE
 MAX_OPEN_POSITIONS     = 2        # never hold more than 2 coins at once
 DAILY_LOSS_LIMIT_USD   = 5.0      # stop buying for the day after $5 net loss
 # Lock in wins — stop NEW buys once daily profit hits this (sells still run)
